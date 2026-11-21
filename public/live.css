@@ -1,0 +1,472 @@
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --ink:#3a2e26; --ink-soft:#6d5c50; --ink-dim:#9a8a7c;
+  --cream:#fbf5ea; --line:rgba(58,46,38,.10);
+  --yellow:#f3c34c; --yellow-deep:#e0a92b;
+}
+html,body{width:100%;height:100%;overflow:hidden}
+body{
+  font-family:"PingFang SC","Noto Sans SC","Microsoft YaHei",sans-serif;
+  color:var(--ink); background:var(--cream);
+}
+.scene{position:relative;width:100vw;height:100vh;overflow:hidden}
+
+.bg{position:absolute;inset:0;overflow:hidden;transform-origin:52% 46%;
+  background:url("assets/rei/studio.jpg") center/cover no-repeat, #dfe6ee;
+  animation:kbDrift 46s ease-in-out infinite alternate;}
+@keyframes kbDrift{
+  0%{transform:scale(1.005) translate3d(0,0,0)}
+  100%{transform:scale(1.055) translate3d(-1.1%,-1.4%,0)}
+}
+@media (prefers-reduced-motion: reduce){ .bg{animation:none} }
+.bg::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(180deg,rgba(238,244,252,.52) 0%,rgba(232,239,249,.28) 42%,rgba(226,234,246,.62) 100%);}
+.glow{position:absolute;border-radius:50%;filter:blur(70px);opacity:.35;z-index:1}
+.g1{width:120vw;height:70vh;background:#bfd6f2;left:-30vw;top:-18vh}
+.g2{width:110vw;height:60vh;background:#cdd9ee;right:-35vw;top:28vh;opacity:.42}
+.g3{width:100vw;height:50vh;background:#e2ecf8;left:10vw;bottom:-22vh;opacity:.5}
+.grain{position:absolute;inset:0;z-index:2;opacity:.5;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='120' height='120' filter='url(%23n)' opacity='0.06'/></svg>")}
+
+/* ---------- 立绘：靠右放大，脚可以落进底部弹幕区（抖音会盖住脚部） ---------- */
+.stage{position:absolute;inset:0;z-index:3;display:flex;align-items:flex-end;justify-content:flex-end;
+  padding-right:8.5vw}
+.halo{position:absolute;left:70vw;bottom:11vh;transform:translateX(-50%);
+  width:64vw;height:46vh;border-radius:50%;
+  background:radial-gradient(circle,rgba(214,230,248,.72) 0%,rgba(214,230,248,0) 68%);filter:blur(6px)}
+.girl{position:relative;z-index:2;height:66.5vh;width:auto;object-fit:contain;margin-bottom:16vh;
+  filter:drop-shadow(0 14px 22px rgba(48,66,96,.2));transform-origin:50% 92%;
+  animation:breathe 5.6s ease-in-out infinite}
+@keyframes breathe{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-4px) scale(1.007)}}
+/* 没人说话时的发呆小动作：轻轻晃，别像挂画 */
+.girl.restless{animation:idleSway 11s ease-in-out infinite}
+@keyframes idleSway{
+  0%,100%{transform:translateY(0) rotate(0deg)}
+  22%{transform:translateY(-5px) rotate(-1.4deg)}
+  48%{transform:translateY(-2px) rotate(.6deg)}
+  72%{transform:translateY(-6px) rotate(-.7deg)}
+}
+.shadow{position:absolute;left:70vw;bottom:16vh;transform:translateX(-50%);
+  width:26vw;height:2.8vh;border-radius:50%;background:rgba(104,74,46,.22);filter:blur(12px)}
+
+/* ---------- 左侧上下两个正方形框 ---------- */
+/* 边长 = 32vw（正方形）。竖排放中间安全带，避开顶部浮层与底部评论区 */
+.card{position:absolute;z-index:6;left:5vw;width:23vw;height:9vh;
+  background:rgba(252,252,250,.97);border:1px solid rgba(58,72,100,.18);border-radius:16px;
+  padding:9px 10px 10px;backdrop-filter:blur(14px);box-shadow:0 8px 22px rgba(48,66,96,.14);
+  overflow:hidden;display:flex;flex-direction:column}
+.dmcard{display:none}
+
+/* 独立方块：一台正在走的磁带机（机身 CSS 绘制，窗里的卷盘在转） */
+.deckcard{top:57.4vh;height:9.2vh;padding:4px}
+.deck-body{position:relative;flex:1 1 auto;border-radius:8px;overflow:hidden;
+  background:linear-gradient(180deg,#454b53 0%,#31373e 46%,#1d2229 100%);
+  border:1px solid rgba(10,14,20,.55);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.14),inset 0 -2px 6px rgba(0,0,0,.45),0 2px 8px rgba(20,28,40,.28)}
+/* 右侧那道浅灰盖板 */
+.deck-body::before{content:"";position:absolute;right:0;top:0;bottom:0;width:60%;
+  background:linear-gradient(180deg,#767d86 0%,#5c636c 55%,#4c535c 100%);
+  border-left:1px solid rgba(0,0,0,.4);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}
+/* 左侧机身上的几道凹槽 */
+.deck-lec{position:absolute;left:7px;top:9px;width:26%;height:2px;border-radius:1px;
+  background:rgba(255,255,255,.1);box-shadow:0 6px 0 rgba(255,255,255,.08),0 12px 0 rgba(255,255,255,.06)}
+.deck-brand{position:absolute;z-index:4;right:8px;top:4px;font-size:5.5px;font-weight:600;
+  letter-spacing:1.7px;color:#f4f7fa;text-shadow:0 1px 2px rgba(0,0,0,.55)}
+.deck-win{position:absolute;z-index:3;right:6px;top:9px;width:50%;height:58%;border-radius:3px;
+  background:linear-gradient(160deg,#151b23 0%,#0d1218 62%,#1b232d 100%);
+  box-shadow:inset 0 0 7px rgba(0,0,0,.9),0 0 0 1px rgba(255,255,255,.13);
+  display:flex;align-items:center;justify-content:center;gap:2px;overflow:hidden}
+.deck-win::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(108deg,rgba(255,255,255,.24) 0 20%,rgba(255,255,255,.05) 34%,transparent 52%)}
+.dreel{position:relative;z-index:2;width:16px;height:16px;border-radius:50%;
+  background:radial-gradient(circle at 50% 45%,#eaf0f8 0 30%,#bccadb 31% 57%,#8397ad 58% 100%);
+  box-shadow:0 0 0 1px rgba(0,0,0,.72),0 0 4px rgba(150,182,222,.4);
+  animation:deckSpin 2.2s linear infinite}
+.dreel::before{content:"";position:absolute;left:50%;top:2px;width:2px;height:2px;margin-left:-1px;
+  border-radius:50%;background:rgba(255,255,255,.9);box-shadow:0 0 3px rgba(255,255,255,.7)}
+.dreel::after{content:"";position:absolute;inset:4px;border-radius:50%;
+  background:conic-gradient(from 0deg,#49556a 0 10%,transparent 10% 25%,#49556a 25% 35%,
+    transparent 35% 50%,#49556a 50% 60%,transparent 60% 75%,#49556a 75% 85%,transparent 85% 100%)}
+.deck-win .d2{animation-duration:2.9s;animation-direction:reverse}
+.dstrip{position:relative;z-index:1;width:22px;height:3px;border-radius:1px;
+  background:linear-gradient(180deg,#5b4b39,#2c2216);
+  box-shadow:0 1px 2px rgba(0,0,0,.65)}
+.dgreen{position:absolute;z-index:3;right:3px;bottom:3px;width:2.5px;height:2.5px;border-radius:50%;
+  background:#84e18d;box-shadow:0 0 5px #84e18d;animation:deckBlink 2.2s ease-in-out infinite}
+@keyframes deckSpin{to{transform:rotate(360deg)}}
+@keyframes deckBlink{0%,100%{opacity:.28}50%{opacity:1}}
+.saycard{top:43.6vh;height:12.6vh;padding:7px 10px 8px}
+
+/* 说句框顶部：弹幕并进来的一行 */
+.dmrow{display:flex;align-items:center;gap:5px;flex:0 0 auto;
+  padding-bottom:3px;margin-bottom:2px;border-bottom:1px solid rgba(58,72,100,.12)}
+.dmtag{flex:0 0 auto;font-size:8px;letter-spacing:.06em;color:#fff;padding:1px 5px;border-radius:999px;
+  background:linear-gradient(180deg,#d9a838,#bb8318);box-shadow:0 1px 2px rgba(120,85,10,.22)}
+.dmlast{flex:1 1 auto;min-width:0;font-size:8.6px;line-height:1.25;color:var(--ink-dim);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dmnum{flex:0 0 auto;font-size:8px;color:#a87c14;font-variant-numeric:tabular-nums}
+
+/* 上：弹幕 */
+.dmhead{display:flex;align-items:baseline;gap:4px;margin-bottom:0;flex:0 0 auto;font-size:7px;line-height:1.15}
+.dmtitle{font-size:10px;font-weight:600;color:#a87c14;letter-spacing:1px;white-space:nowrap}
+.dmline{font-size:9px;color:var(--ink-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dmlist{list-style:none;display:flex;flex-direction:column;gap:1px;min-height:0;flex:1 1 auto;overflow:hidden}
+.dmlist li{flex:0 0 auto;font-size:10px;line-height:1.3;color:var(--ink);display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.dmlist li b{font-weight:600;color:#a58a5f;margin-right:3px}
+.dmlist li.empty{color:var(--ink-dim);font-size:10.5px;-webkit-line-clamp:3}
+
+/* 下：她说的话 */
+.sayhead{display:flex;align-items:baseline;justify-content:space-between;gap:6px;flex:0 0 auto}
+.who{display:inline-block;font-size:9.5px;letter-spacing:2px;color:#a87c14;font-weight:600;flex:0 0 auto}
+.saycard p{margin-top:2px;font-size:11.5px;line-height:1.4;color:var(--ink);word-break:break-word;
+  overflow:hidden;flex:1 1 auto}
+.saycard p .cursor{display:inline-block;width:2px;height:1em;background:var(--yellow-deep);margin-left:2px;animation:blink .8s steps(1) infinite;vertical-align:-2px}
+@keyframes blink{50%{opacity:0}}
+.mood{position:static;flex:0 0 auto;font-size:9px;color:var(--ink-dim)}
+
+.deckhud{position:absolute;z-index:5;inset:0;padding:0;background:none;pointer-events:none;color:#f1e4c4}
+.deckhud.hide{display:none}
+.deckhud .tkblock{position:absolute;left:5px;top:5px;bottom:35px;width:34%;box-sizing:border-box;display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:4px 4px 0;border-radius:5px;background:rgba(6,10,16,.42);border:1px solid rgba(255,255,255,.06);font-variant-numeric:tabular-nums}
+.deckhud .tkline{display:flex;align-items:baseline;gap:1.5px;line-height:1.1;white-space:nowrap}
+.deckhud .tknum{font-weight:600;color:#e8c877;font-size:8px;letter-spacing:0}
+.deckhud .tkunit{opacity:.62;font-size:6px;color:#f1e4c4;margin-left:1px}
+.deckhud .tkcost{opacity:.9;font-size:6.8px;line-height:1.25;color:#f1e4c4}
+.deckhud .tkbadge{position:absolute;left:5px;bottom:5px;width:34%;box-sizing:border-box;font-weight:700;font-size:8px;line-height:1.12;letter-spacing:.1em;text-align:center;padding:3px 5px 4px;border-radius:5px;color:#fff;background:linear-gradient(180deg,#d9a838,#bb8318);box-shadow:0 1px 3px rgba(0,0,0,.35)}
+
+/* ---------- 提示 ---------- */
+.toast{position:absolute;z-index:9;right:14px;bottom:26vh;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.toast .t{background:rgba(58,46,38,.9);color:#fff;font-size:11.5px;padding:6px 11px;border-radius:10px;animation:tin .3s ease both}
+@keyframes tin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+.soundhint{position:absolute;z-index:10;left:50%;transform:translateX(-50%);bottom:24vh;
+  background:rgba(58,46,38,.86);color:#fff;font-size:11.5px;padding:6px 13px;border-radius:999px;cursor:pointer}
+.soundhint.hide{display:none}
+
+/* 截图/静态模式：跳过动画与打字机 */
+body.static .toast .t{animation:none!important}
+body.static .girl{animation:none!important}
+
+/* 速写本上的画中画：展示她正在画的内容 */
+.sketchwin{
+  position:absolute; z-index:6; left:6.4vw; top:26.2vh;
+  box-sizing:border-box;
+  width:30.5vw; height:13.4vh;
+  padding:3px;
+  border-radius:4px; overflow:hidden;
+  background:#fbfaf4;
+  border:1px solid rgba(120,104,80,.28);
+  box-shadow:0 3px 10px rgba(48,66,96,.10);
+  /* 贴着画板上那张纸的角度，看起来是“画在板上的”而不是浮窗 */
+  transform:perspective(1200px) rotateY(7deg) rotateX(-1.5deg);
+  transform-origin:50% 50%;
+}
+.sketchwin video{
+  width:100%;height:100%;object-fit:cover;display:block;
+  border-radius:2px;
+  filter:saturate(.86) brightness(1.06) contrast(.96);
+  transition:opacity .65s ease; opacity:0;
+}
+.sketchwin video.on{opacity:1}
+.sketchwin video.b{position:absolute; inset:3px; z-index:1}
+.sketchwin .sketchtag{
+  position:absolute; right:5px; bottom:4px;
+  font-size:9px; letter-spacing:.12em; color:#6b5844;
+  background:rgba(255,253,248,.86); border:1px solid rgba(88,70,52,.16);
+  border-radius:999px; padding:1px 6px;
+}
+body.static .sketchwin{opacity:.98}
+
+/* ---------- 可直接拖：三个浮层随时能拖，位置存 config.json.ui.layout ---------- */
+.saycard,.sketchwin,.deckcard{cursor:grab}
+.saycard:hover,.sketchwin:hover,.deckcard:hover{outline:1.5px dashed rgba(207,154,34,.42);outline-offset:3px}
+.saycard.dragging,.sketchwin.dragging,.deckcard.dragging{cursor:grabbing;outline:1.5px dashed rgba(207,154,34,.9)!important}
+.sketchwin video{pointer-events:none}   /* 不然拖到视频上会被视频自己吃掉 */
+
+/* ---------- 拖动模式：四个浮层可自由摆位 ---------- */
+body.layout-edit .draggable{
+  cursor:move; pointer-events:auto;
+  outline:1.5px dashed rgba(207,154,34,.9); outline-offset:3px;
+  touch-action:none;
+}
+body.layout-edit .draggable.dragging{
+  opacity:.9; outline-style:solid; outline-color:#e0a92f;
+  box-shadow:0 12px 30px rgba(30,40,60,.28);
+}
+body.layout-edit .scene::before{
+  content:"拖动模式：按住说句窗 / 速写窗 / 磁带直接拖，松手自动记住位置";
+  position:absolute; z-index:30; top:6px; left:50%; transform:translateX(-50%);
+  padding:4px 12px; border-radius:999px; font-size:11px; letter-spacing:.04em;
+  color:#6b4d0e; background:rgba(255,243,214,.94); border:1px solid rgba(207,154,34,.5);
+  box-shadow:0 2px 8px rgba(120,90,20,.12); white-space:nowrap;
+}
+
+/* 用量方块：搁在磁带左上角那块空壳面上，避开卷盘窗口 */
+/* AI 直播：竖排标签钉在左下 */
+
+/* ---------- 提示 ---------- */
+.toast{position:absolute;z-index:9;right:14px;bottom:26vh;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.toast .t{background:rgba(58,46,38,.9);color:#fff;font-size:11.5px;padding:6px 11px;border-radius:10px;animation:tin .3s ease both}
+@keyframes tin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+.soundhint{position:absolute;z-index:10;left:50%;transform:translateX(-50%);bottom:24vh;
+  background:rgba(58,46,38,.86);color:#fff;font-size:11.5px;padding:6px 13px;border-radius:999px;cursor:pointer}
+.soundhint.hide{display:none}
+
+/* 截图/静态模式：跳过动画与打字机 */
+body.static .toast .t{animation:none!important}
+body.static .girl{animation:none!important}
+
+/* 速写本上的画中画：展示她正在画的内容 */
+.sketchwin{
+  position:absolute; z-index:6; left:6.4vw; top:26.2vh;
+  box-sizing:border-box;
+  width:30.5vw; height:13.4vh;
+  padding:3px;
+  border-radius:4px; overflow:hidden;
+  background:#fbfaf4;
+  border:1px solid rgba(120,104,80,.28);
+  box-shadow:0 3px 10px rgba(48,66,96,.10);
+  /* 贴着画板上那张纸的角度，看起来是“画在板上的”而不是浮窗 */
+  transform:perspective(1200px) rotateY(7deg) rotateX(-1.5deg);
+  transform-origin:50% 50%;
+}
+.sketchwin video{
+  width:100%;height:100%;object-fit:cover;display:block;
+  border-radius:2px;
+  filter:saturate(.86) brightness(1.06) contrast(.96);
+  transition:opacity .35s linear; opacity:1;
+}
+.sketchwin video.fading{opacity:.3}
+.sketchwin .sketchtag{
+  position:absolute; right:5px; bottom:4px;
+  font-size:9px; letter-spacing:.12em; color:#6b5844;
+  background:rgba(255,253,248,.86); border:1px solid rgba(88,70,52,.16);
+  border-radius:999px; padding:1px 6px;
+}
+body.static .sketchwin{opacity:.98}
+
+/* ---------- 拖动模式：四个浮层可自由摆位 ---------- */
+body.layout-edit .draggable{
+  cursor:move; pointer-events:auto;
+  outline:1.5px dashed rgba(207,154,34,.9); outline-offset:3px;
+  touch-action:none;
+}
+body.layout-edit .draggable.dragging{
+  opacity:.9; outline-style:solid; outline-color:#e0a92f;
+  box-shadow:0 12px 30px rgba(30,40,60,.28);
+}
+body.layout-edit .scene::before{
+  content:"拖动模式：按住说句窗 / 速写窗 / 磁带直接拖，松手自动记住位置";
+  position:absolute; z-index:30; top:6px; left:50%; transform:translateX(-50%);
+  padding:4px 12px; border-radius:999px; font-size:11px; letter-spacing:.04em;
+  color:#6b4d0e; background:rgba(255,243,214,.94); border:1px solid rgba(207,154,34,.5);
+  box-shadow:0 2px 8px rgba(120,90,20,.12); white-space:nowrap;
+}
+
+
+/* ---------- 提示 ---------- */
+.toast{position:absolute;z-index:9;right:14px;bottom:26vh;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.toast .t{background:rgba(58,46,38,.9);color:#fff;font-size:11.5px;padding:6px 11px;border-radius:10px;animation:tin .3s ease both}
+@keyframes tin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+.soundhint{position:absolute;z-index:10;left:50%;transform:translateX(-50%);bottom:24vh;
+  background:rgba(58,46,38,.86);color:#fff;font-size:11.5px;padding:6px 13px;border-radius:999px;cursor:pointer}
+.soundhint.hide{display:none}
+
+/* 截图/静态模式：跳过动画与打字机 */
+body.static .toast .t{animation:none!important}
+body.static .girl{animation:none!important}
+
+/* 速写本上的画中画：展示她正在画的内容 */
+.sketchwin{
+  position:absolute; z-index:6; left:6.4vw; top:26.2vh;
+  box-sizing:border-box;
+  width:30.5vw; height:13.4vh;
+  padding:3px;
+  border-radius:4px; overflow:hidden;
+  background:#fbfaf4;
+  border:1px solid rgba(120,104,80,.28);
+  box-shadow:0 3px 10px rgba(48,66,96,.10);
+  /* 贴着画板上那张纸的角度，看起来是“画在板上的”而不是浮窗 */
+  transform:perspective(1200px) rotateY(7deg) rotateX(-1.5deg);
+  transform-origin:50% 50%;
+}
+.sketchwin video{
+  width:100%;height:100%;object-fit:cover;display:block;
+  border-radius:2px;
+  filter:saturate(.86) brightness(1.06) contrast(.96);
+  transition:opacity .35s linear; opacity:1;
+}
+.sketchwin video.fading{opacity:.3}
+.sketchwin .sketchtag{
+  position:absolute; right:5px; bottom:4px;
+  font-size:9px; letter-spacing:.12em; color:#6b5844;
+  background:rgba(255,253,248,.86); border:1px solid rgba(88,70,52,.16);
+  border-radius:999px; padding:1px 6px;
+}
+body.static .sketchwin{opacity:.98}
+
+/* ---------- 拖动模式：四个浮层可自由摆位 ---------- */
+body.layout-edit .draggable{
+  cursor:move; pointer-events:auto;
+  outline:1.5px dashed rgba(207,154,34,.9); outline-offset:3px;
+  touch-action:none;
+}
+body.layout-edit .draggable.dragging{
+  opacity:.9; outline-style:solid; outline-color:#e0a92f;
+  box-shadow:0 12px 30px rgba(30,40,60,.28);
+}
+body.layout-edit .scene::before{
+  content:"拖动模式：按住说句窗 / 速写窗 / 磁带直接拖，松手自动记住位置";
+  position:absolute; z-index:30; top:6px; left:50%; transform:translateX(-50%);
+  padding:4px 12px; border-radius:999px; font-size:11px; letter-spacing:.04em;
+  color:#6b4d0e; background:rgba(255,243,214,.94); border:1px solid rgba(207,154,34,.5);
+  box-shadow:0 2px 8px rgba(120,90,20,.12); white-space:nowrap;
+}
+
+
+/* ---------- 提示 ---------- */
+.toast{position:absolute;z-index:9;right:14px;bottom:26vh;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.toast .t{background:rgba(58,46,38,.9);color:#fff;font-size:11.5px;padding:6px 11px;border-radius:10px;animation:tin .3s ease both}
+@keyframes tin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+.soundhint{position:absolute;z-index:10;left:50%;transform:translateX(-50%);bottom:24vh;
+  background:rgba(58,46,38,.86);color:#fff;font-size:11.5px;padding:6px 13px;border-radius:999px;cursor:pointer}
+.soundhint.hide{display:none}
+
+/* 截图/静态模式：跳过动画与打字机 */
+body.static .toast .t{animation:none!important}
+body.static .girl{animation:none!important}
+
+/* 速写本上的画中画：展示她正在画的内容 */
+.sketchwin{
+  position:absolute; z-index:6; left:6.4vw; top:26.2vh;
+  box-sizing:border-box;
+  width:30.5vw; height:13.4vh;
+  padding:3px;
+  border-radius:4px; overflow:hidden;
+  background:#fbfaf4;
+  border:1px solid rgba(120,104,80,.28);
+  box-shadow:0 3px 10px rgba(48,66,96,.10);
+  /* 贴着画板上那张纸的角度，看起来是“画在板上的”而不是浮窗 */
+  transform:perspective(1200px) rotateY(7deg) rotateX(-1.5deg);
+  transform-origin:50% 50%;
+}
+.sketchwin video{
+  width:100%;height:100%;object-fit:cover;display:block;
+  border-radius:2px;
+  filter:saturate(.86) brightness(1.06) contrast(.96);
+  transition:opacity .35s linear; opacity:1;
+}
+.sketchwin video.fading{opacity:.3}
+.sketchwin .sketchtag{
+  position:absolute; right:5px; bottom:4px;
+  font-size:9px; letter-spacing:.12em; color:#6b5844;
+  background:rgba(255,253,248,.86); border:1px solid rgba(88,70,52,.16);
+  border-radius:999px; padding:1px 6px;
+}
+body.static .sketchwin{opacity:.98}
+
+/* ---------- 拖动模式：四个浮层可自由摆位 ---------- */
+body.layout-edit .draggable{
+  cursor:move; pointer-events:auto;
+  outline:1.5px dashed rgba(207,154,34,.9); outline-offset:3px;
+  touch-action:none;
+}
+body.layout-edit .draggable.dragging{
+  opacity:.9; outline-style:solid; outline-color:#e0a92f;
+  box-shadow:0 12px 30px rgba(30,40,60,.28);
+}
+body.layout-edit .scene::before{
+  content:"拖动模式：按住说句窗 / 速写窗 / 磁带直接拖，松手自动记住位置";
+  position:absolute; z-index:30; top:6px; left:50%; transform:translateX(-50%);
+  padding:4px 12px; border-radius:999px; font-size:11px; letter-spacing:.04em;
+  color:#6b4d0e; background:rgba(255,243,214,.94); border:1px solid rgba(207,154,34,.5);
+  box-shadow:0 2px 8px rgba(120,90,20,.12); white-space:nowrap;
+}
+
+
+/* ---------- 提示 ---------- */
+.toast{position:absolute;z-index:9;right:14px;bottom:26vh;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.toast .t{background:rgba(58,46,38,.9);color:#fff;font-size:11.5px;padding:6px 11px;border-radius:10px;animation:tin .3s ease both}
+@keyframes tin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+.soundhint{position:absolute;z-index:10;left:50%;transform:translateX(-50%);bottom:24vh;
+  background:rgba(58,46,38,.86);color:#fff;font-size:11.5px;padding:6px 13px;border-radius:999px;cursor:pointer}
+.soundhint.hide{display:none}
+
+/* 截图/静态模式：跳过动画与打字机 */
+body.static .toast .t{animation:none!important}
+body.static .girl{animation:none!important}
+
+/* 速写本上的画中画：展示她正在画的内容 */
+.sketchwin{
+  position:absolute; z-index:6; left:6.4vw; top:26.2vh;
+  box-sizing:border-box;
+  width:30.5vw; height:13.4vh;
+  padding:3px;
+  border-radius:4px; overflow:hidden;
+  background:#fbfaf4;
+  border:1px solid rgba(120,104,80,.28);
+  box-shadow:0 3px 10px rgba(48,66,96,.10);
+  /* 贴着画板上那张纸的角度，看起来是“画在板上的”而不是浮窗 */
+  transform:perspective(1200px) rotateY(7deg) rotateX(-1.5deg);
+  transform-origin:50% 50%;
+}
+.sketchwin video{
+  width:100%;height:100%;object-fit:cover;display:block;
+  border-radius:2px;
+  filter:saturate(.86) brightness(1.06) contrast(.96);
+  transition:opacity .35s linear; opacity:1;
+}
+.sketchwin video.fading{opacity:.3}
+.sketchwin .sketchtag{
+  position:absolute; right:5px; bottom:4px;
+  font-size:9px; letter-spacing:.12em; color:#6b5844;
+  background:rgba(255,253,248,.86); border:1px solid rgba(88,70,52,.16);
+  border-radius:999px; padding:1px 6px;
+}
+body.static .sketchwin{opacity:.98}
+
+/* ---------- 拖动模式：四个浮层可自由摆位 ---------- */
+body.layout-edit .draggable{
+  cursor:move; pointer-events:auto;
+  outline:1.5px dashed rgba(207,154,34,.9); outline-offset:3px;
+  touch-action:none;
+}
+body.layout-edit .draggable.dragging{
+  opacity:.9; outline-style:solid; outline-color:#e0a92f;
+  box-shadow:0 12px 30px rgba(30,40,60,.28);
+}
+
+body.layout-edit .scene::before{
+  content:"拖动模式：按住这四个框直接拖，松手自动记住位置";
+  position:absolute; z-index:30; top:6px; left:50%; transform:translateX(-50%);
+  padding:4px 12px; border-radius:999px; font-size:11px; letter-spacing:.04em;
+  color:#6b4d0e; background:rgba(255,243,214,.94); border:1px solid rgba(207,154,34,.5);
+  box-shadow:0 2px 8px rgba(120,90,20,.12); white-space:nowrap;
+}
+
+/* ---------- 用量小挂件：贴在她说的话下面，跟左侧那一列对齐 ---------- */
+.tokchip{
+  position:absolute; z-index:6; left:5vw; top:63.6vh;
+  display:flex; align-items:center; gap:6px;
+  padding:5px 13px 5px 9px; border-radius:999px;
+  background:rgba(253,252,249,.9);
+  border:1px solid rgba(88,70,52,.2);
+  color:#54452f; font-size:13px; line-height:1.35; letter-spacing:.02em;
+  box-shadow:0 2px 10px rgba(60,50,40,.12);
+  backdrop-filter:blur(10px);
+  opacity:.96; white-space:nowrap; pointer-events:none;
+}
+.tokchip.hide{display:none}
+.tokchip .tkdot{width:6px;height:6px;border-radius:50%;background:#cf9a22;box-shadow:0 0 6px rgba(207,154,34,.5)}
+.tokchip .tkbadge{
+  font-weight:700; font-size:10.5px; letter-spacing:.08em;
+  padding:2px 7px; border-radius:999px; color:#fff;
+  background:linear-gradient(180deg,#d9a838,#bb8318);
+  box-shadow:0 1px 2px rgba(120,85,10,.25);
+}
+.tokchip .tkunit{opacity:.65;font-size:10.5px}
+.tokchip .tksep{opacity:.35}

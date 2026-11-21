@@ -1,0 +1,16 @@
+node_modules/
+config.json
+logs/
+*.log
+.DS_Store
+voice_cache/
+
+# 数据：只保留示例，真实台词库与状态不进库
+data/*
+!data/persona.example.md
+!data/lines.example.json
+data/voice/
+
+# 本地合成器与模型
+GPT-SoVITS/
+.venv-sovits/

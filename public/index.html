@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>绫波丽 · 直播间</title>
+<link rel="stylesheet" href="live.css?v=86">
+</head>
+<body>
+<div class="scene">
+  <div class="bg">
+    <div class="glow g1"></div><div class="glow g2"></div><div class="glow g3"></div>
+    <div class="grain"></div>
+  </div>
+
+  <section class="stage">
+    <div class="halo"></div>
+    <img class="girl" id="girl" src="assets/rei/v2_base.png" alt="绫波丽">
+    <div class="shadow"></div>
+  </section>
+
+  <ol id="dmlist" hidden></ol>
+
+
+  <aside class="card deckcard" id="deckCard">
+    <div class="deck-body">
+      <span class="deck-lec"></span>
+      <span class="deck-brand">SONY</span>
+      <span class="deck-win">
+        <i class="dreel d1"></i>
+        <i class="dstrip"></i>
+        <i class="dreel d2"></i>
+        <span class="dgreen"></span>
+      </span>
+      <div class="deckhud" id="deckHud">
+        <div class="tkblock">
+          <div class="tkline"><span class="tknum" id="tkNum">0</span><span class="tkunit">tok</span></div>
+          <span class="tkcost" id="tkCost">¥0</span>
+        </div>
+        <span class="tkbadge">AI<br>直播</span>
+      </div>
+    </div>
+  </aside>
+  <div class="sketchwin" id="sketchwin">
+    <video id="sketchVid" class="on" src="assets/studio/sketch.mp4" muted playsinline autoplay preload="auto"></video>
+    <video id="sketchVidB" class="b" muted playsinline preload="auto"></video>
+    <span class="sketchtag">正在画</span>
+  </div>
+
+  <aside class="card saycard" id="sayCard">
+    <div class="dmrow">
+      <span class="dmtag">弹幕</span>
+      <span class="dmlast" id="dmLast">等观众说话</span>
+      <span class="dmnum" id="dmNum">0</span>
+    </div>
+    <div class="sayhead"><span class="who">绫波丽</span><span class="mood" id="moodTag">在这儿</span></div>
+    <p id="say">在的，你说。</p>
+  </aside>
+
+  <audio id="voice" preload="none"></audio>
+  <div class="toast" id="toast"></div>
+  <div class="soundhint" id="soundhint">🔊 点一下，开启声音</div>
+
+  <div class="ghost" hidden>
+    <span id="dmState">弹幕未连</span><span id="dmCount">0</span>
+    <span id="statReply">0</span><span id="statGift">0</span><span id="statIncome">0.00</span>
+    <span id="gcount">0</span><span id="glist"></span>
+  </div>
+</div>
+<script src="live.js?v=86"></script>
+</body>
+</html>

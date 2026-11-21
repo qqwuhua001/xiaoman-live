@@ -1,0 +1,1123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>绫波丽 · 直播控制板</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2330;--line:#2b3444;--txt:#e6edf3;--dim:#8b98a5;--accent:#4ea8ff;--warn:#ff7a59;--ok:#3fb950}
+*{box-sizing:border-box}
+body{margin:0 auto;background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,"PingFang SC",sans-serif;padding:18px 20px 40px;max-width:1180px}
+h1{font-size:17px;margin:0 0 2px;font-weight:600;letter-spacing:.5px}
+.sub{color:var(--dim);font-size:12px;margin-bottom:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+.card h2{font-size:13px;margin:0 0 10px;color:var(--dim);font-weight:600;letter-spacing:.5px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input[type=text],select,textarea{background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:9px 11px;font-size:14px;outline:none;font-family:inherit}
+input[type=text]:focus,textarea:focus{border-color:var(--accent)}
+textarea{width:100%;min-height:60px;resize:vertical}
+button{background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:9px 13px;font-size:13px;cursor:pointer;transition:.12s;font-family:inherit;white-space:nowrap}
+button:hover{border-color:var(--accent);color:#fff}
+button.primary{background:#1f6feb;border-color:#1f6feb}
+button.primary:hover{background:#388bfd}
+button.danger{background:#3d1d1b;border-color:#6e2a24;color:#ff9b8a}
+button.on{background:#123d22;border-color:#2ea043;color:#7ee2a8}
+button.tiny{padding:5px 9px;font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:7px}
+.grid button{padding:10px 6px;font-size:13px}
+.grid button small{display:block;color:var(--dim);font-size:10px;margin-top:2px}
+.status{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--dim);
+  background:var(--panel2);border-radius:8px;padding:8px 12px;margin-bottom:14px;align-items:center;
+  position:sticky;top:0;z-index:9;border:1px solid transparent;
+  backdrop-filter:blur(12px);background-color:rgba(20,23,28,.86)}
+.nav{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 16px}
+.nav a{font-size:12px;color:#9fb4cc;text-decoration:none;border:1px solid var(--line);background:var(--panel2);padding:6px 12px;border-radius:999px;transition:.12s}
+.nav a:hover{color:#fff;border-color:var(--accent)}
+.sec{margin-bottom:24px}
+.sec h3{font-size:12.5px;color:#8fa6bd;letter-spacing:1.2px;margin:0 0 11px;display:flex;align-items:center;gap:8px;font-weight:600}
+.sec h3::before{content:"";width:3px;height:13px;border-radius:2px;background:var(--accent)}
+.sec h3 .tip{margin-left:auto;font-weight:400;letter-spacing:0;font-size:11.5px;color:#6f7f90}
+.cols{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:stretch}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 14px}
+.canvas{position:relative;min-height:520px}
+.canvas .card{position:absolute;margin:0;overflow:auto}
+.canvas.edit{background-image:linear-gradient(rgba(78,168,255,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(78,168,255,.07) 1px,transparent 1px);background-size:28px 28px;border-radius:12px}
+.canvas.edit .card{outline:1px dashed rgba(78,168,255,.45);outline-offset:0}
+.canvas.edit .card > h2{cursor:grab;user-select:none}
+.canvas.edit .card.moving{outline:1px solid var(--accent);box-shadow:0 10px 26px rgba(0,0,0,.45)}
+.canvas.edit .card.moving > h2{cursor:grabbing}
+.rz{display:none;position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;
+  background:linear-gradient(135deg,transparent 46%,rgba(78,168,255,.85) 47% 53%,transparent 54%);
+  border-bottom-right-radius:10px}
+.canvas.edit .card .rz{display:block}
+@media(max-width:900px){
+  .canvas .card{position:static !important;width:auto !important;height:auto !important;margin-bottom:14px}
+  .canvas{min-height:0}
+}
+.cols > .card{margin-bottom:0}
+.cols .wide{grid-column:1/-1}
+.stack{display:flex;flex-direction:column;gap:14px}
+.stack .card{margin-bottom:0}
+@media(max-width:900px){
+  .cols{grid-template-columns:1fr}
+  .cols .wide{grid-column:auto}
+  .duo{grid-template-columns:1fr;gap:14px}
+}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;vertical-align:middle;background:#444}
+.dot.on{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.dot.say{background:var(--accent);box-shadow:0 0 6px var(--accent)}
+.dot.mute{background:var(--warn)}
+ul.list{list-style:none;margin:0;padding:0;max-height:190px;overflow:auto;flex:1 1 auto;min-height:0}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#2b3444;border-radius:6px;border:2px solid var(--panel)}
+::-webkit-scrollbar-thumb:hover{background:#3a4658}
+::-webkit-scrollbar-corner{background:transparent}
+ul.list li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid #232b38;font-size:13px}
+ul.list li:last-child{border-bottom:0}
+ul.list li .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim)}
+ul.list li b{font-weight:500}
+.hint{color:var(--dim);font-size:12px;margin-top:8px}
+.toast{position:fixed;right:20px;bottom:20px;background:#1f6feb;color:#fff;padding:10px 16px;border-radius:9px;font-size:13px;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none;max-width:440px}
+.toast.show{opacity:1;transform:none}
+.toast.err{background:#a13d32}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.card.compact{padding:12px 14px}
+.volrow{display:flex;align-items:center;gap:10px}
+.volgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 30px}
+.duo{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:26px}
+.card{display:flex;flex-direction:column}
+.volrow .lb{width:70px;color:var(--dim);font-size:13px;flex-shrink:0}
+.wheel{flex:0 0 168px;width:168px;height:34px;display:flex;align-items:center;justify-content:center;gap:3px;
+  border-radius:999px;border:1px solid rgba(78,168,255,.32);position:relative;overflow:hidden;
+  background:linear-gradient(180deg,rgba(78,168,255,.10),rgba(78,168,255,.02));
+  color:#8fc6ff;cursor:ns-resize;user-select:none;outline:none;
+  transition:border-color .12s,box-shadow .12s,background .12s}
+.wheel:hover,.wheel:focus{border-color:rgba(78,168,255,.7);box-shadow:0 0 0 3px rgba(78,168,255,.12)}
+.wheel:active{background:linear-gradient(180deg,rgba(78,168,255,.18),rgba(78,168,255,.04))}
+.wheel .wnum{font-size:17px;font-weight:600;letter-spacing:.02em;font-variant-numeric:tabular-nums}
+.wheel .wunit{font-size:11px;color:var(--dim);margin-left:1px}
+.wheel .wfill{position:absolute;left:0;bottom:0;height:2px;width:0;border-radius:2px;
+  background:linear-gradient(90deg,#4ea8ff,#8fd9ff);opacity:.9;transition:width .1s linear}
+.wsub{width:44px;text-align:right;font-size:11px;color:var(--dim);flex-shrink:0}
+.usage{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:9px}
+.usage>div{background:var(--panel2);border:1px solid #232b38;border-radius:9px;padding:9px 11px}
+.usage b{display:block;font-size:19px;font-weight:600;letter-spacing:.3px;line-height:1.2}
+.usage small{display:block;color:var(--dim);font-size:11px;margin-top:2px}
+.pbox{width:100%;min-height:250px;background:var(--panel2);border:1px solid #232b38;border-radius:9px;color:#cfe0f5;font:12.5px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace;padding:10px 12px;resize:vertical;outline:none}
+.pbox:focus{border-color:#3a5f8a}
+.pbox.dirty{border-color:#8a6b2a}
+.hudlab{font-size:12px;color:var(--dim);font-weight:400;letter-spacing:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer}
+.hudlab input{accent-color:#4ea8ff;margin:0}
+.rbox{min-height:150px}
+.lbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.lbar input[type=search]{flex:1;min-width:150px;background:var(--panel2);border:1px solid #232b38;border-radius:8px;color:#cfe0f5;font-size:12.5px;padding:6px 9px;outline:none}
+.lbar select{background:var(--panel2);border:1px solid #232b38;border-radius:8px;color:#cfe0f5;font-size:12.5px;padding:6px 8px;outline:none}
+.llist{display:flex;flex-direction:column;gap:5px;max-height:460px;overflow:auto;padding-right:2px}
+.lrow{display:flex;align-items:center;gap:8px;padding:5px 9px;border:1px solid #232b38;border-radius:8px;background:var(--panel2)}
+.lrow.off{opacity:.42}
+.lcat{font-size:10.5px;color:#7f93ad;border:1px solid #2b3546;border-radius:5px;padding:1px 5px;flex-shrink:0;min-width:52px;text-align:center}
+.ltxt{flex:1;font-size:12.5px;line-height:1.5;color:#cfe0f5;word-break:break-word}
+.lrow.editing{background:#16202d;border-color:#3a4a63}
+.ledit{flex:1;min-width:0;background:#0e1621;border:1px solid #3a4a63;border-radius:7px;
+  color:#dbe8f8;font:inherit;font-size:12.5px;line-height:1.5;padding:4px 7px;outline:none;resize:none;height:auto;min-height:30px}
+.lrow .tiny{padding:3px 8px;font-size:11px}
+.lsw{width:34px;height:18px;border-radius:9px;background:#2b3546;position:relative;flex-shrink:0;cursor:pointer;border:0;padding:0}
+.lsw.on{background:#2f6f4f}
+.lsw i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#c9d6e6;transition:left .15s}
+.lsw.on i{left:18px;background:#bfe9cf}
+@media(max-width:860px){.two{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<h1>绫波丽 · 直播控制板</h1>
+<div class="sub">说 / 听 / 看 / 写 四块分区，从上往下就是直播时的操作顺序</div>
+
+<div class="status">
+  <span><i class="dot" id="dSrv"></i><span id="tSrv">连接中</span></span>
+  <span><i class="dot" id="dVox"></i><span id="tVox">安静</span></span>
+  <span><i class="dot" id="dMute"></i><span id="tMute">自语开</span></span>
+  <span><i class="dot" id="dRadio"></i><span id="tRadio">电台 —</span></span>
+  <span id="tLines">台词 —</span>
+  <span class="row" style="margin-left:auto">
+    <button class="tiny" onclick="sayIntro()">说开场白</button>
+     <button class="tiny on" id="btnAuto" onclick="toggleAuto()">自动说话：开</button>
+    <button class="tiny" onclick="wrapUp()">收工（说一句再关窗）</button>
+    <button class="tiny danger" onclick="windowAct('off')">关闭直播窗口</button>
+    <button class="tiny" onclick="windowAct('on')">重开窗口</button>
+  </span>
+</div>
+
+<div class="toolbar">
+  <button class="primary" id="btnPanelEdit" onclick="togglePanelEdit()">编辑布局</button>
+  <button onclick="resetPanelLayout()">恢复默认</button>
+  <span class="hint" style="margin:0">编辑模式下按住卡片标题拖动，拖右下角改大小；布局只存在本机浏览器里。</span>
+</div>
+
+<div class="canvas" id="canvas">
+    <div class="card" data-card="say" data-w="full">
+          <h2>让她说</h2>
+          <textarea id="sayText" placeholder="打一句中文。260 条预合成里的句子是 0 延迟，其它句子现场合成约 10 秒。"></textarea>
+          <div class="row" style="margin-top:9px">
+            <button class="primary" onclick="sayNow()">说这句</button>
+            <button onclick="randomSay()">随机说一句</button>
+            <button class="danger" onclick="stopVoice()">立刻停住</button>
+            <button id="btnMute" onclick="toggleMute()">暂停自言自语</button>
+          </div>
+          <div class="hint">回车 = 说这句。停止只停当前这句，自语开关是另一个按钮。</div>
+        </div>
+
+    <div class="card" data-card="read" data-w="full">
+          <h2>长文朗读（她自己写的东西）</h2>
+          <textarea id="readText" class="rbox" placeholder="粘一整篇进来：按 90–110 字并段，边合成边念，第一段约 10 秒出声；想开播就零等待、不断顿，先点「预生成音频」把整篇跑一遍（同一篇再念就走缓存，立刻出声）。朗读期间自语、招呼、答谢这些自动话全部让路，念完自动恢复。"></textarea>
+          <div class="row" style="margin-top:9px">
+            <button class="primary" onclick="readStart()">开始朗读</button>
+            <button class="danger" onclick="readStop()">停止朗读</button>
+            <button onclick="readPickFile()">导入 txt / md</button>
+            <button onclick="readPremake()">预生成音频（先跑完，直播时零等待）</button>
+            <input type="file" id="readFile" accept=".txt,.md,text/plain" style="display:none" onchange="readImport(this)">
+            <span class="hint" id="readHint" style="margin:0">—</span>
+          </div>
+        </div>
+
+    <div class="card" data-card="lines" data-w="full">
+          <h2>台词库（逐句开关 / 立刻说 / 删除）</h2>
+          <div class="lbar">
+            <select id="lineCat" onchange="renderLines()"><option value="">全部</option></select>
+            <input type="search" id="lineSearch" placeholder="搜一句…" oninput="renderLines()">
+            <span class="hint" id="lineCount" style="margin:0">—</span>
+          </div>
+          <div class="llist" id="lineList"></div>
+          <div class="hint">关掉＝这句不再被抽到（招呼、快答、自语都认这个开关）；删除＝从 data/lines.json 里抹掉，不能撤回。句中的 {name} 是观众昵称占位。</div>
+        </div>
+
+    <div class="card" data-card="idle" data-w="half">
+          <h2>自言自语频率</h2>
+          <div class="row" id="idleRow">
+            <button onclick="setIdle('off')" data-i="off">不说</button>
+            <button onclick="setIdle('slow')" data-i="slow">偶尔</button>
+            <button onclick="setIdle('normal')" data-i="normal">正常</button>
+            <button onclick="setIdle('fast')" data-i="fast">勤快</button>
+            <button onclick="setIdle('chatty')" data-i="chatty">一直念</button>
+          </div>
+          <div class="hint" id="idleHint">没人说话 40 秒后开口，两次之间至少隔 45 秒。</div>
+        </div>
+
+    <div class="card" data-card="pose" data-w="half">
+          <h2>换个动作</h2>
+          <div class="grid" id="poseGrid"></div>
+          <div class="hint">常驻动作（画画 / 托腮 / 窗边）不会自动回位，点「回到画画」复位。</div>
+        </div>
+
+    <div class="card" data-card="recent" data-w="half">
+          <h2>最近说过（防重复、看效果）</h2>
+          <ul class="list" id="recentList"></ul>
+        </div>
+
+    <div class="card" data-card="vol" data-w="full">
+          <h2>音量</h2>
+          <div class="volgrid">
+      <div class="volrow"><span class="lb">她说话</span>
+            <div class="wheel" id="w-voice" data-kind="voice" tabindex="0" title="滚轮上下 / 上下拖动 / 方向键">
+              <span class="wnum" id="v-voice">—</span><span class="wunit">dB</span><span class="wfill"></span>
+            </div><span class="wsub" id="p-voice"></span>
+          </div>
+          <div class="volrow"><span class="lb">拟音</span>
+            <div class="wheel" id="w-sfx" data-kind="sfx" tabindex="0" title="滚轮上下 / 上下拖动 / 方向键">
+              <span class="wnum" id="v-sfx">—</span><span class="wunit">dB</span><span class="wfill"></span>
+            </div><span class="wsub" id="p-sfx"></span>
+          </div>
+          <div class="volrow"><span class="lb">环境音</span>
+            <div class="wheel" id="w-amb" data-kind="amb" tabindex="0" title="滚轮上下 / 上下拖动 / 方向键">
+              <span class="wnum" id="v-amb">—</span><span class="wunit">dB</span><span class="wfill"></span>
+            </div><span class="wsub" id="p-amb"></span>
+          </div>
+          <div class="volrow"><span class="lb">音乐</span>
+            <div class="wheel" id="w-music" data-kind="music" tabindex="0" title="滚轮上下 / 上下拖动 / 方向键">
+              <span class="wnum" id="v-music">—</span><span class="wunit">dB</span><span class="wfill"></span>
+            </div><span class="wsub" id="p-music"></span>
+          </div>
+          </div>
+      <div class="hint">数值是分贝（dB，0 为最大，−60 为静音）；滚轮上下 / 拖动 / 方向键都能调。右侧百分比以你现在的四路音量为 50% 基准（她说话 −4.4 / 拟音 −17.7 / 环境 −23.1 / 音乐 −27），往上每 +2dB≈+10%，往下同理。音乐改动会在停手 0.9 秒后生效。</div>
+        </div>
+
+    <div class="card" data-card="media" data-w="full">
+            <h2>音乐与环境音</h2>
+            <div class="duo">
+              <div>
+                <div class="row">
+                  <button id="btnRadio" onclick="toggleRadio()">开电台</button>
+                  <button onclick="radioAct('next')">下一首</button>
+                  <span id="nowSong" class="hint" style="margin:0">—</span>
+                </div>
+                <div class="row" style="margin-top:9px">
+                  <input type="file" id="musicFile" accept="audio/*" style="font-size:12px;color:var(--dim)">
+                  <button onclick="uploadMusic()">添加进曲库</button>
+                </div>
+                <ul class="list" id="musicList" style="margin-top:8px"></ul>
+              </div>
+              <div>
+                <div class="grid" id="ambGrid"></div>
+                <div class="hint">六个可以叠加，音量在上面统一调。</div>
+              </div>
+            </div>
+          </div>
+
+    <div class="card" data-card="layout" data-w="half">
+          <h2 style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+            <span>画面元素位置（可拖动）</span>
+            <span style="display:flex;gap:6px">
+              <button class="btn" id="btnLayEdit" onclick="toggleLayoutEdit()">打开拖动模式</button>
+              <button class="btn" onclick="resetAllLayout()">全部复位</button>
+            </span>
+          </h2>
+          <ul class="list" id="layoutList"></ul>
+          <div class="hint">直播窗口里 <b>说句窗 / 速写窗 / 磁带</b> 现在随时能拖：鼠标移上去出现淡黄虚线，按住就跟着走，松手自动记住（重开窗口、重启服务都还在）。想让三个框常亮虚线、看得更清楚，点「打开拖动模式」，拖完再关掉即可。</div>
+        </div>
+
+    <div class="card" data-card="usage" data-w="half">
+          <h2 style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+            <span>Token 用量</span>
+            <label class="hudlab"><input type="checkbox" id="hudToggle" onchange="setHud(this.checked)"> 直播画面显示</label>
+          </h2>
+          <div class="usage">
+            <div><b id="uToday">—</b><small>今日 token</small></div>
+            <div><b id="uInOut">—</b><small>输入 / 输出</small></div>
+            <div><b id="uCost">—</b><small>今日花费</small></div>
+            <div><b id="uAvg">—</b><small>单条均价</small></div>
+            <div><b id="uReply">—</b><small>今日模型回复</small></div>
+            <div><b id="uLife">—</b><small>累计花费</small></div>
+          </div>
+          <div class="hint">单条均价 = 今日花费 ÷ 模型回复次数（台词库那些零消耗的不算进去）。改人格后实测约 ¥0.003/条。直播画面那个小挂件观众也看得见，不想露就取消勾选。</div>
+        </div>
+
+    <div class="card" data-card="persona" data-w="full">
+          <h2 style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+            <span>人设（直接改，改完保存就生效）</span>
+            <span style="display:flex;gap:6px">
+              <button class="btn" onclick="loadPersona(true)">重新读取</button>
+              <button class="btn" onclick="savePersona()">保存并生效</button>
+            </span>
+          </h2>
+          <textarea id="personaBox" class="pbox" spellcheck="false" placeholder="正在读取 data/persona.md …"></textarea>
+          <div class="hint"><span id="pchars">0</span> 字 · 文件位置 <code>data/persona.md</code> · 保存后下一句就用新设定，不用重启。别删【怎么说话】那一段，语气全靠它。</div>
+        </div>
+
+    <div class="card" data-card="line" data-w="full">
+                <h2>加台词（自动转语音）</h2>
+                <div class="row">
+                  <input type="text" id="lineText" placeholder="新台词，一句就好" style="flex:1;min-width:220px">
+                  <select id="lineCat">
+                    <option value="short">短句应答</option>
+                    <option value="paper">画纸</option>
+                    <option value="light">光</option>
+                    <option value="things">物件</option>
+                    <option value="self">自己</option>
+                    <option value="quiet">安静</option>
+                    <option value="body">身体</option>
+                    <option value="monologue">独白</option>
+                  </select>
+                  <button class="primary" onclick="addLine()">写入并合成</button>
+                </div>
+                <div class="hint">写进 data/lines.json，同时后台合成到 voice_cache。合成好后这条就是 0 延迟。</div>
+              </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '';
+const POSES = [
+  ['base','画画',0], ['think','托腮',12000], ['blink','眨眼',170],
+  ['hair','撩刘海',2400], ['drink','喝水',3400], ['stretch','伸懒腰',4200],
+  ['phone','看手机',4200], ['lookout','看窗外',5200], ['lean','俯身',4200],
+  ['holdup','举纸',4200], ['blow','吹纸',3200], ['wipe','擦汗',3000],
+  ['point','指一下',4000], ['crouch','蹲下',3600], ['stand','站起来',2000],
+  ['walk','走两步',1500], ['window','站窗边',9000], ['wave','挥手',2400],
+];
+const AMB = [['rain','下雨'],['thunder','打雷'],['wind','刮风'],['frog','蛙鸣'],['bird','鸟叫'],['fire','柴火']];
+let radioOn = false, muted = false, musicCache = [];
+
+/* 数字格式化：token 用 k/M，钱按量级给小数位 */
+function fmtTok(n){
+  const v = Number(n) || 0;
+  if (v >= 1000000) return (v / 1000000).toFixed(1) + 'M';
+  if (v >= 1000) return (v / 1000).toFixed(v >= 10000 ? 0 : 1) + 'k';
+  return String(Math.round(v));
+}
+function fmtMoney(n){
+  const v = Number(n) || 0;
+  if (v >= 1) return '¥' + v.toFixed(2);
+  if (v >= 0.01) return '¥' + v.toFixed(3);
+  return '¥' + v.toFixed(4);
+}
+function setText(id, txt){
+  const el = document.getElementById(id);
+  if (el) el.textContent = txt;
+}
+async function setHud(show){
+  try {
+    await post('/api/control/hud', {showTokens: !!show});
+    toast(show ? '直播画面显示用量' : '直播画面已隐藏用量');
+  } catch(e){ toast(e.message, true); }
+}
+
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function toast(msg, err){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'toast show' + (err ? ' err' : '');
+  clearTimeout(t._t);
+  t._t = setTimeout(() => t.className = 'toast', 2600);
+}
+async function post(url, body){
+  const r = await fetch(API + url, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body||{})});
+  const j = await r.json().catch(() => ({ok:false}));
+  if (!j.ok) throw new Error(j.error || '请求失败');
+  return j;
+}
+async function get(url){
+  const r = await fetch(API + url);
+  return r.json();
+}
+
+/* 动作 */
+const poseGrid = document.getElementById('poseGrid');
+POSES.forEach(([name, label, ms]) => {
+  const b = document.createElement('button');
+  b.innerHTML = label + '<small>' + (ms ? (ms/1000).toFixed(1)+'s' : '常驻') + '</small>';
+  b.onclick = async () => {
+    try { await post('/api/control/pose', {name, ms}); toast('动作：' + label); }
+    catch(e){ toast(e.message, true); }
+  };
+  poseGrid.appendChild(b);
+});
+
+/* 环境音 */
+const ambGrid = document.getElementById('ambGrid');
+const ambState = {};
+AMB.forEach(([name, label]) => {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.onclick = async () => {
+    const on = !ambState[name];
+    try {
+      await post('/api/control/ambience', {name, on});
+      ambState[name] = on; b.classList.toggle('on', on);
+      toast(label + (on ? ' 开' : ' 关'));
+    } catch(e){ toast(e.message, true); }
+  };
+  ambGrid.appendChild(b);
+});
+const allOff = document.createElement('button');
+allOff.textContent = '全部关掉';
+allOff.onclick = async () => {
+  for (const [name, label] of AMB) {
+    if (ambState[name]) { await post('/api/control/ambience', {name, on:false}); ambState[name] = false; }
+  }
+  [...ambGrid.querySelectorAll('button')].forEach(b => b.classList.remove('on'));
+  toast('环境音全关');
+};
+ambGrid.appendChild(allOff);
+
+/* 说话 */
+async function sayNow(){
+  const text = document.getElementById('sayText').value.trim();
+  if (!text) return toast('先写一句', true);
+  toast('合成了，稍等…');
+  try {
+    const j = await post('/api/control/say', {text});
+    document.getElementById('sayText').value = '';
+    toast(j.voice?.precomp ? '预合成命中，0 延迟' : '现场合成好了');
+  } catch(e){ toast(e.message, true); }
+}
+async function randomSay(){
+  try { const j = await post('/api/control/random'); toast('她说：' + (j.text || '').slice(0, 16)); }
+  catch(e){ toast(e.message, true); }
+}
+async function stopVoice(){
+  try { await post('/api/control/stop'); toast('已停'); } catch(e){ toast(e.message, true); }
+}
+
+/* ---- 总闸：自动说话 ---- */
+let autoOn = true;
+function applyAuto(){
+  const b = document.getElementById('btnAuto');
+  if (b) { b.textContent = '自动说话：' + (autoOn ? '开' : '关'); b.classList.toggle('on', autoOn); }
+  const t = document.getElementById('tAuto');
+  if (t) t.textContent = '自动说话 ' + (autoOn ? '开' : '关');
+}
+async function toggleAuto(){
+  try {
+    const j = await post('/api/control/auto', {speak: !autoOn});
+    autoOn = j.speak !== false;
+    applyAuto();
+    toast(autoOn ? '自动说话已开：自语、招呼、答谢都恢复' : '自动说话已关：只剩手动「让她说」和长文朗读');
+    renderStatus();
+  } catch(e){ toast(e.message, true); }
+}
+
+/* ---- 台词库 ---- */
+const CAT_LABEL = {
+  paper:'画纸', short:'短句', light:'光', things:'东西', self:'自己', quiet:'安静', body:'身体', work:'手上动作',
+  monologue:'独白', reach:'搭话', greet:'招呼(旧)', greet_new:'新客招呼', greet_known:'来过招呼', greet_old:'熟客招呼',
+  hold:'留人', follow:'关注', gift:'礼物', bye:'收工', quick:'快答', manual:'手写',
+};
+let lineData = [];
+let lineCats = {};
+async function loadLines(){
+  try {
+    const j = await get('/api/control/lines');
+    lineData = j.lines || []; lineCats = j.cats || {};
+    const sel = document.getElementById('lineCat');
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">全部 ' + lineData.length + '</option>' +
+      Object.keys(lineCats).sort((a,b)=>(lineCats[b]-lineCats[a])).map(c =>
+        `<option value="${c}">${esc((CAT_LABEL[c]||c))} ${lineCats[c]}</option>`).join('');
+    sel.value = keep && lineCats[keep] ? keep : '';
+    renderLines();
+    /* 这张卡第一次出现在存档里时是空的，高度会被存成很小；清掉让它按列表长 */
+    const lc = document.querySelector('.card[data-card="lines"]');
+    if (lc && lineData.length) { lc.style.height = ''; setTimeout(() => { canvasFit(); savePanelLayout(); }, 60); }
+  } catch(e){ document.getElementById('lineCount').textContent = '读取失败'; }
+}
+function renderLines(){
+  const q = (document.getElementById('lineSearch').value || '').trim();
+  const cat = document.getElementById('lineCat').value;
+  const rows = lineData.filter(l => (!cat || l.cat === cat) && (!q || l.text.includes(q)));
+  document.getElementById('lineCount').textContent = rows.length + ' / ' + lineData.length + ' 句 · 开着 ' + lineData.filter(l=>!l.off).length;
+  document.getElementById('lineList').innerHTML = rows.map(l =>
+    `<div class="lrow${l.off ? ' off' : ''}" data-id="${l.id}">
+       <button class="lsw${l.off ? '' : ' on'}" onclick="lineToggle('${l.id}', ${l.off ? 'true' : 'false'})" title="${l.off ? '这句现在是关的' : '点一下关掉这句'}"><i></i></button>
+       <span class="lcat">${esc(CAT_LABEL[l.cat] || l.cat)}</span>
+       <span class="ltxt">${esc(l.text)}</span>
+       <button class="tiny" onclick="lineEdit('${l.id}')">改</button>
+       <button class="tiny" onclick="lineSay('${l.id}')">说</button>
+       <button class="tiny danger" onclick="lineDel('${l.id}')">删</button>
+     </div>`).join('') || '<div class="hint">没有匹配的句子</div>';
+  setTimeout(canvasFit, 30);   // 列表撑高卡片后画布要跟着长，不然页面滚不到底
+}
+let editingLineId = null;
+function lineEdit(id){
+  if (editingLineId) { toast('先把上一句存了或撤了', true); return; }
+  const l = lineData.find(x => x.id === id);
+  if (!l) return;
+  const row = document.querySelector('.lrow[data-id="' + id + '"]');
+  if (!row) return;
+  const span = row.querySelector('.ltxt');
+  editingLineId = id;
+  row.classList.add('editing');
+  span.innerHTML = '';
+  const inp = document.createElement('textarea');
+  inp.className = 'ledit';
+  inp.value = l.text;
+  inp.rows = Math.min(4, Math.max(1, Math.ceil(l.text.length / 26)));
+  const save = document.createElement('button');
+  save.className = 'tiny'; save.textContent = '存';
+  const cancel = document.createElement('button');
+  cancel.className = 'tiny'; cancel.textContent = '撤';
+  span.append(inp, save, cancel);
+  span.style.display = 'flex'; span.style.gap = '6px'; span.style.alignItems = 'center';
+  inp.focus();
+  inp.setSelectionRange(inp.value.length, inp.value.length);
+  const done = () => { editingLineId = null; renderLines(); };
+  const commit = async () => {
+    const text = inp.value.trim();
+    if (!text) return toast('不能改成空句', true);
+    if (text === l.text) { done(); return; }
+    try {
+      const j = await post('/api/control/lineEdit', {id, text});
+      toast('改好了：' + (j.line?.text || text).slice(0, 16));
+      if (lineData.indexOf(l) >= 0) { l.text = text; if (j.line?.id) l.id = j.line.id; }
+      done(); loadLines();
+    } catch(e){ toast(e.message, true); }
+  };
+  save.onclick = commit;
+  cancel.onclick = done;
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') { e.preventDefault(); done(); }
+  });
+}
+
+async function lineToggle(id, isOff){
+  try {
+    await post('/api/control/lineSet', {id, off: !isOff});
+    const l = lineData.find(x => x.id === id); if (l) l.off = !isOff;
+    renderLines(); toast(!isOff ? '已关掉这句' : '已打开这句');
+  } catch(e){ toast(e.message, true); }
+}
+async function lineSay(id){
+  try { const j = await post('/api/control/lineSay', {id}); toast('她说：' + (j.text || '').slice(0, 18)); }
+  catch(e){ toast(e.message, true); }
+}
+async function lineDel(id){
+  const l = lineData.find(x => x.id === id);
+  if (!confirm('删掉这句？\n\n' + (l ? l.text : '') + '\n\n删了不能撤回。')) return;
+  try {
+    await post('/api/control/lineDel', {id});
+    lineData = lineData.filter(x => x.id !== id);
+    renderLines(); toast('已删除');
+  } catch(e){ toast(e.message, true); }
+}
+
+/* ---- 长文朗读 ---- */
+let readTimer = null;
+function readHintShow(r){
+  const el = document.getElementById('readHint');
+  if (!el) return;
+  if (!r || !r.running){
+    el.textContent = (r && r.total) ? ('读完 ' + r.total + ' 句') : '—';
+    return;
+  }
+  el.textContent = '正在读 ' + r.idx + ' / ' + r.total + ' 句' + (r.title ? ' · ' + r.title : '');
+}
+function readPickFile(){ document.getElementById('readFile').click(); }
+function readImport(input){
+  const f = input.files && input.files[0];
+  if (!f) return;
+  const fr = new FileReader();
+  fr.onload = () => {
+    document.getElementById('readText').value = String(fr.result || '');
+    toast('已载入「' + f.name + '」');
+  };
+  fr.readAsText(f, 'utf-8');
+  input.value = '';
+}
+let readPremTimer = null;
+async function sayIntro(){
+  try{
+    const j = await post('/api/control/intro', {});
+    toast(`开场白 ${j.said||3} 句已发出`);
+  }catch(e){ toast(e.message, true); }
+}
+
+async function readPremake(){
+  const text = (document.getElementById('readText')?.value || '').trim();
+  if(!text) return toast('先粘一篇进来', true);
+  try{
+    const j = await post('/api/control/read/premake', {text});
+    const h = document.getElementById('readHint');
+    const paint = (pm)=>{ if(h) h.textContent = pm && pm.running ? `预生成 ${pm.idx}/${pm.total} 段…` : `预生成完成 ${pm.done||0}/${pm.total||0} 段，现在点开始朗读基本零等待`; };
+    paint(j.prem);
+    if(readPremTimer) clearInterval(readPremTimer);
+    readPremTimer = setInterval(async ()=>{
+      try{
+        const st = await get('/api/control/read/prem/status');
+        paint(st.prem);
+        if(!st.prem || !st.prem.running){ clearInterval(readPremTimer); readPremTimer = null; }
+      }catch(e){ /* 抖一下继续 */ }
+    }, 3000);
+  }catch(e){ toast(e.message, true); }
+}
+
+async function readStart(){
+  const text = (document.getElementById('readText').value || '').trim();
+  if (!text) return toast('先把要读的粘进来', true);
+  toast('合成第一句，约 3 秒…');
+  try {
+    const j = await post('/api/control/read/start', {text});
+    readHintShow(j.read || {running: true, idx: j.idx, total: j.total});
+    if (readTimer) clearInterval(readTimer);
+    readTimer = setInterval(async () => {
+      try {
+        const st = await get('/api/control/read/status');
+        readHintShow(st.read);
+        if (!st.read || !st.read.running) { clearInterval(readTimer); readTimer = null; }
+      } catch(e){ /* 网络抖一下就算了 */ }
+    }, 1500);
+  } catch(e){ toast(e.message, true); }
+}
+async function readStop(){
+  try {
+    await post('/api/control/read/stop');
+    if (readTimer) { clearInterval(readTimer); readTimer = null; }
+    readHintShow({running: false, total: 0});
+    toast('朗读已停');
+  } catch(e){ toast(e.message, true); }
+}
+async function wrapUp(){
+  try {
+    const r = await post('/api/control/wrapup');
+    toast('说了「' + (r.text || '') + '」，' + Math.round((r.closeInMs||0)/1000) + ' 秒后关窗');
+  } catch(e){ toast(e.message, true); }
+}
+async function windowAct(action){
+  try {
+    await post('/api/control/window', {action});
+    toast(action === 'off' ? '直播窗口已关闭' : '窗口正在重开…');
+  } catch(e){ toast(e.message, true); }
+}
+async function toggleMute(){
+  try {
+    const j = await post('/api/control/mute', {paused: !muted});
+    muted = j.paused;
+    document.getElementById('btnMute').classList.toggle('on', muted);
+    document.getElementById('btnMute').textContent = muted ? '恢复自言自语' : '暂停自言自语';
+    toast(muted ? '她自己不说了' : '恢复');
+    renderStatus();
+  } catch(e){ toast(e.message, true); }
+}
+
+/* 音乐 */
+async function toggleRadio(){
+  try {
+    const st = await get('/api/control/state');
+    const r = st.radio || {};
+    const playing = !!(r.playing ?? (r.running && !r.paused));
+    await post('/api/radio', {action: playing ? 'pause' : 'start'});
+    toast(playing ? '电台关' : '电台开');
+    setTimeout(renderStatus, 300);
+  } catch(e){ toast(e.message, true); }
+}
+async function radioAct(action){
+  try { await post('/api/radio', {action}); toast('切歌'); setTimeout(renderStatus, 600); } catch(e){ toast(e.message, true); }
+}
+async function loadMusic(){
+  try {
+    const j = await get('/api/control/music');
+    const list = j.tracks || [];
+    musicCache = list;
+    const ul = document.getElementById('musicList');
+    ul.innerHTML = '';
+    document.getElementById('nowSong').textContent = j.now || '—';
+    if (!list.length) ul.innerHTML = '<li><span class="nm">曲库是空的</span></li>';
+    list.slice(0, 60).forEach(t => {
+      const li = document.createElement('li');
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = (t.name || t.file) + (t.sec ? ' · ' + Math.round(t.sec / 60) + '分' : '');
+      const del = document.createElement('button');
+      del.className = 'tiny';
+      del.textContent = '删';
+      del.onclick = async () => {
+        if (!confirm('从曲库删掉《' + (t.name || t.file) + '》？')) return;
+        try { await post('/api/control/music/delete', {file: t.file}); toast('删了'); loadMusic(); }
+        catch(e){ toast(e.message, true); }
+      };
+      li.appendChild(nm);
+      li.appendChild(del);
+      ul.appendChild(li);
+    });
+  } catch(e){ /* 静默 */ }
+}
+async function uploadMusic(){
+  const f = document.getElementById('musicFile').files[0];
+  if (!f) return toast('先选一个音频文件', true);
+  toast('上传中…');
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      await post('/api/control/music/upload', {name: f.name, data: reader.result});
+      toast('已加入曲库：' + f.name);
+      loadMusic();
+    } catch(e){ toast(e.message, true); }
+  };
+  reader.readAsDataURL(f);
+}
+
+/* 加台词 */
+async function addLine(){
+  const text = document.getElementById('lineText').value.trim();
+  const cat = document.getElementById('lineCat').value;
+  if (!text) return toast('写一句', true);
+  try {
+    const j = await post('/api/control/lineAdd', {text, cat});
+    document.getElementById('lineText').value = '';
+    toast(j.dup ? '这句已经有了' : '已写入，后台合成中…');
+    renderStatus();
+  } catch(e){ toast(e.message, true); }
+}
+
+/* 自言自语频率 */
+const IDLE_HINT = {
+  off: '完全不主动说话。有人说话时照样回。',
+  slow: '没人说话 90 秒后才开口，很安静。',
+  normal: '没人说话 40 秒后开口，两次之间至少隔 45 秒。',
+  fast: '没动静 15 秒就开口，两次之间至少隔 20 秒。',
+  chatty: '一直在说话，大约十几秒一句。',
+};
+function paintIdle(mode){
+  document.querySelectorAll('#idleRow button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.i === mode);
+  });
+  const h = document.getElementById('idleHint');
+  if (h) h.textContent = IDLE_HINT[mode] || '';
+}
+function setIdle(mode){
+  post('/api/control/idle', { mode }).then(() => {
+    paintIdle(mode);
+    toast('自语频率：' + (IDLE_HINT[mode] || mode).split('。')[0]);
+  }).catch((e) => toast(e.message, true));
+}
+
+/* 音量：dB 显示 + 无极滚轮（滚轮 / 拖动 / 方向键） */
+const DB = {};          // 每路当前 dB（-60 = 静音，0 = 最大）
+const volTimer = {};
+const DB_MIN = -60;
+/* 四路的基准点：这几个 dB 就是你耳朵认可的“一半”。50% 在这里，往上往下各 10dB 到 100%/0%。 */
+const DB_REF = { voice: -4.4, sfx: -17.7, amb: -23.1, music: -27.0 };
+function dbPct(kind, db){
+  if (db <= DB_MIN + 0.5) return 0;
+  const pct = 50 + (db - (DB_REF[kind] ?? -20)) * 5;
+  return Math.max(0, Math.min(100, Math.round(pct)));
+}
+
+function v2db(v){
+  const x = Number(v) || 0;
+  if (x <= 0.0008) return DB_MIN;
+  return Math.max(DB_MIN, Math.min(0, 20 * Math.log10(x)));
+}
+function db2v(db){
+  if (db <= DB_MIN) return 0;
+  return Math.min(1, Math.pow(10, db / 20));
+}
+function paintVol(kind){
+  const db = DB[kind];
+  const num = document.getElementById('v-' + kind);
+  const sub = document.getElementById('p-' + kind);
+  const box = document.getElementById('w-' + kind);
+  if (num) num.textContent = db <= DB_MIN + 0.5 ? '静音' : (db > -0.05 ? '0.0' : db.toFixed(1));
+  if (box) {
+    box.querySelector('.wunit').style.display = db <= DB_MIN + 0.5 ? 'none' : '';
+    const fill = box.querySelector('.wfill');
+    if (fill) fill.style.width = dbPct(kind, db) + '%';
+  }
+  if (sub) sub.textContent = dbPct(kind, db) + '%';
+}
+function pushVol(kind){
+  clearTimeout(volTimer[kind]);
+  // 音乐要重启 afplay 才会换音量，停手久一点再提交，免得每滚一格都重放
+  const delay = kind === 'music' ? 900 : 180;
+  volTimer[kind] = setTimeout(() => {
+    post('/api/control/volume', { kind, value: db2v(DB[kind]) }).catch((e) => toast(e.message, true));
+  }, delay);
+}
+function setDb(kind, db){
+  DB[kind] = Math.max(DB_MIN, Math.min(0, db));
+  paintVol(kind);
+  pushVol(kind);
+}
+function bindWheel(){
+  ['voice','sfx','amb','music'].forEach((kind) => {
+    const box = document.getElementById('w-' + kind);
+    if (!box || box.dataset.bound) return;
+    box.dataset.bound = '1';
+    box.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      setDb(kind, (DB[kind] ?? 0) + (e.deltaY > 0 ? -0.5 : 0.5));
+    }, { passive: false });
+    let drag = null;
+    box.addEventListener('pointerdown', (e) => {
+      // 先只记起点，真的移动超过 3px 才开始改，避免手一抖/页面滚动误触
+      drag = { y: e.clientY, db: DB[kind] ?? 0, armed: false };
+      box.focus();
+    });
+    box.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      if (!drag.armed) {
+        if (Math.abs(e.clientY - drag.y) < 3) return;
+        drag.armed = true;
+        try { box.setPointerCapture(e.pointerId); } catch { /* 不支持就算了 */ }
+      }
+      setDb(kind, drag.db + (drag.y - e.clientY) * 0.06);   // 约 17px = 1dB
+    });
+    box.addEventListener('pointerup', () => { drag = null; });
+    box.addEventListener('pointercancel', () => { drag = null; });
+    box.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowRight') { e.preventDefault(); setDb(kind, (DB[kind] ?? 0) + 0.5); }
+      else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') { e.preventDefault(); setDb(kind, (DB[kind] ?? 0) - 0.5); }
+    });
+  });
+}
+async function loadVols(){
+  try {
+    const st = await get('/api/control/state');
+    const v = st.volumes || {};
+    ['voice','sfx','amb','music'].forEach((k) => {
+      if (v[k] == null) return;
+      DB[k] = v2db(v[k]);
+      paintVol(k);
+    });
+    paintIdle((st.idle && st.idle.mode) ? st.idle.mode : 'normal');
+    bindWheel();
+  } catch(e){ /* 服务没起来就算了 */ }
+}
+
+/* 状态 */
+async function renderStatus(){
+  try {
+    const st = await get('/api/control/state');
+    document.getElementById('dSrv').classList.add('on');
+    document.getElementById('tSrv').textContent = '服务在线';
+    document.getElementById('tLines').textContent = '台词 ' + (st.lines || 0) + ' 条';
+    autoOn = !(st.auto && st.auto.speak === false);
+    applyAuto();
+    readHintShow(st.read);
+    muted = !!st.monoPaused;
+    document.getElementById('dMute').className = 'dot' + (muted ? ' mute' : ' on');
+    document.getElementById('tMute').textContent = muted ? '自语暂停' : '自语开';
+    document.getElementById('btnMute').classList.toggle('on', muted);
+    document.getElementById('btnMute').textContent = muted ? '恢复自言自语' : '暂停自言自语';
+    const r = st.radio || {};
+    radioOn = !!(r.playing ?? (r.running && !r.paused));
+    const rname = (r.current && (r.current.name || r.current.title)) || '';
+    const dot = document.getElementById('dRadio');
+    if (dot) dot.classList.toggle('on', radioOn);
+    const rb = document.getElementById('btnRadio');
+    rb.classList.toggle('on', radioOn);
+    rb.textContent = radioOn ? '关电台' : '开电台';
+    document.getElementById('tRadio').textContent = radioOn ? ('电台 开' + (rname ? ' · ' + rname : '')) : '电台 关';
+    document.getElementById('nowSong').textContent = rname || '—';
+
+    /* 用量 */
+    const s = st.stats || {};
+    const replies = Number(s.replies || 0);
+    const calls = Number(s.aiCalls || 0);
+    setText('uToday', fmtTok(s.tokensToday) + ' tok');
+    setText('uInOut', fmtTok(s.tokensIn) + ' / ' + fmtTok(s.tokensOut));
+    setText('uCost', fmtMoney(s.spent));
+    setText('uAvg', calls ? fmtMoney(Number(s.spent || 0) / calls) : '—');
+    setText('uReply', String(calls || replies));
+    setText('uLife', fmtMoney(s.costLifetime));
+    const hud = st.hud || {};
+    const tg = document.getElementById('hudToggle');
+    if (tg && document.activeElement !== tg) tg.checked = hud.showTokens !== false;
+  } catch(e){
+    document.getElementById('dSrv').className = 'dot mute';
+    document.getElementById('tSrv').textContent = '服务没起来';
+  }
+}
+
+/* 人设：面板里直接改，保存后立刻生效 */
+const pbox = document.getElementById('personaBox');
+let personaDirty = false;
+function pcount(){
+  const n = document.getElementById('pchars');
+  if (n) n.textContent = pbox ? pbox.value.trim().length : 0;
+  if (pbox) pbox.classList.toggle('dirty', personaDirty);
+}
+async function loadPersona(force){
+  if (personaDirty && !force && !confirm('编辑框里有没保存的修改，重新读取会覆盖，继续？')) return;
+  try {
+    const j = await get('/api/control/persona');
+    pbox.value = j.text || '';
+    personaDirty = false;
+    pcount();
+  } catch(e){ toast(e.message, true); }
+}
+async function savePersona(){
+  const text = pbox.value.trim();
+  if (text.length < 200) return toast('太短了，至少 200 字', true);
+  try {
+    const j = await post('/api/control/persona', {text});
+    personaDirty = false;
+    pcount();
+    toast('已保存并生效：' + j.chars + ' 字');
+  } catch(e){ toast(e.message, true); }
+}
+if (pbox){
+  pbox.addEventListener('input', () => { personaDirty = true; pcount(); });
+  loadPersona(true);
+}
+
+/* 最近说过 */
+async function loadRecent(){
+  try {
+    const st = await get('/api/state');
+    const evs = (st.events || []).filter(e => e.kind === 'ai' && e.text).slice(-8).reverse();
+    const ul = document.getElementById('recentList');
+    ul.innerHTML = '';
+    if (!evs.length) { ul.innerHTML = '<li><span class="nm">还没说过话</span></li>'; return; }
+    evs.forEach(e => {
+      const li = document.createElement('li');
+      const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = e.text;
+      const b = document.createElement('button'); b.className = 'tiny'; b.textContent = '重说';
+      b.onclick = async () => {
+        try { await post('/api/control/say', {text: e.text}); toast('重说这句'); }
+        catch(err){ toast(err.message, true); }
+      };
+      li.appendChild(nm); li.appendChild(b); ul.appendChild(li);
+    });
+  } catch(e){}
+}
+
+/* 语音状态：轮询 voice 播放（控制板看不到页面，只能看有没有新声音） */
+document.getElementById('sayText').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sayNow(); }
+});
+
+/* 画面元素位置 */
+const LAY_LABEL = { say: '说句窗（含弹幕）', sketch: '速写窗', deck: '磁带（AI 直播·用量）' };
+let layEditOn = false;
+function paintLayEdit(){
+  const b = document.getElementById('btnLayEdit');
+  if (!b) return;
+  b.textContent = layEditOn ? '关闭拖动模式' : '打开拖动模式';
+  b.classList.toggle('primary', layEditOn);
+}
+function renderLayout(lay){
+  const ul = document.getElementById('layoutList');
+  if (!ul) return;
+  ul.innerHTML = Object.keys(LAY_LABEL).map((k) => {
+    const p = lay && lay[k];
+    const val = (p && p.x != null) ? Math.round(p.x) + '%, ' + Math.round(p.y) + '%' : '默认位置';
+    return '<li style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #202734">'
+      + '<span style="width:76px;color:var(--dim);font-size:12.5px">' + LAY_LABEL[k] + '</span>'
+      + '<span style="flex:1;font-size:12px;color:#8fa6c4;font-variant-numeric:tabular-nums">' + val + '</span>'
+      + '<button class="tiny" onclick="clearLayout(\'' + k + '\')">复位</button></li>';
+  }).join('');
+}
+async function loadLayout(){
+  try {
+    const st = await get('/api/control/state');
+    layEditOn = !!st.layoutEdit;
+    paintLayEdit();
+    renderLayout(st.layout);
+  } catch (e) { /* 服务没起来就算了 */ }
+}
+async function toggleLayoutEdit(){
+  layEditOn = !layEditOn;
+  paintLayEdit();
+  try {
+    await post('/api/control/layout', { edit: layEditOn });
+    toast(layEditOn ? '拖动模式已开：去直播窗口里直接拖框' : '拖动模式已关');
+  } catch (e) { localStorage; toast(e.message, true); }
+  renderLayout((await get('/api/control/state')).layout);
+}
+async function clearLayout(name){
+  try {
+    await post('/api/control/layout', { name, clear: true });
+    await loadLayout();
+    toast((LAY_LABEL[name] || name) + ' 已复位');
+  } catch (e) { toast(e.message, true); }
+}
+async function resetAllLayout(){
+  try {
+    await post('/api/control/layout', { reset: true });
+    await loadLayout();
+    toast('四个框都回到默认位置');
+  } catch (e) { toast(e.message, true); }
+}
+
+/* ---------- 面板自由布局：拖动 + 缩放 + 本地保存 ---------- */
+const LAY_KEY='xmPanelLayoutV1';
+const canvasEl=document.getElementById('canvas');
+const panelCards=[...canvasEl.querySelectorAll('.card')];
+const GAP=14, MINW=240, MINH=80;
+let panelEdit=false;
+
+panelCards.forEach(el=>{
+  const h=document.createElement('div'); h.className='rz'; el.appendChild(h);
+});
+
+function canvasW(){ return canvasEl.clientWidth || 1120; }
+function halfW(){ return Math.round((canvasW()-GAP)/2); }
+function applyRect(el,r){
+  el.style.left=r.x+'px'; el.style.top=r.y+'px'; el.style.width=r.w+'px';
+  if (r.h) el.style.height=r.h+'px'; else el.style.height='';
+}
+function canvasFit(){
+  const bottom=Math.max(0,...panelCards.map(e=>e.offsetTop+e.offsetHeight));
+  canvasEl.style.height=(bottom+8)+'px';
+}
+function savePanelLayout(){
+  const o={};
+  for (const el of panelCards) o[el.dataset.card]={x:el.offsetLeft,y:el.offsetTop,w:el.offsetWidth,h:el.offsetHeight};
+  try{ localStorage.setItem(LAY_KEY,JSON.stringify(o)); }catch(e){}
+}
+function defaultPanelLayout(){
+  localStorage.removeItem(LAY_KEY);
+  const W=canvasW();
+  panelCards.forEach(el=>{ el.style.height=''; el.style.width=(el.dataset.w==='full'?W:halfW())+'px'; el.style.left='0px'; el.style.top='0px'; });
+  const hs=panelCards.map(e=>e.offsetHeight);
+  let yL=0,yR=0;
+  panelCards.forEach((el,i)=>{
+    const w=(el.dataset.w==='full'?W:halfW()), h=hs[i];
+    if (el.dataset.w==='full'){ const y=Math.max(yL,yR); applyRect(el,{x:0,y:y,w:w}); yL=yR=y+h+GAP; }
+    else if (yL<=yR){ applyRect(el,{x:0,y:yL,w}); yL+=h+GAP; }
+    else { applyRect(el,{x:halfW()+GAP,y:yR,w}); yR+=h+GAP; }
+  });
+  canvasFit();
+}
+function loadPanelLayout(){
+  let o=null;
+  try{ o=JSON.parse(localStorage.getItem(LAY_KEY)||'null'); }catch(e){ o=null; }
+  if(!o){ defaultPanelLayout(); return; }
+  for (const el of panelCards){ const r=o[el.dataset.card]; if(r) applyRect(el,r); }
+  /* 新加的卡片存档里没有：整张挪到最底下，别压在人身上 */
+  const W = canvasEl.clientWidth;
+  let bottom = Math.max(0, ...panelCards.map(e => (o[e.dataset.card] ? e.offsetTop + e.offsetHeight : 0)));
+  for (const el of panelCards){
+    if (o[el.dataset.card]) continue;
+    el.style.height = '';
+    applyRect(el, {x: 0, y: bottom + GAP, w: el.dataset.w === 'full' ? W : halfW()});
+    bottom = el.offsetTop + el.offsetHeight;
+  }
+  canvasFit();
+  savePanelLayout();
+}
+function togglePanelEdit(){
+  panelEdit=!panelEdit;
+  canvasEl.classList.toggle('edit',panelEdit);
+  document.getElementById('btnPanelEdit').textContent=panelEdit?'完成布局':'编辑布局';
+  document.getElementById('btnPanelEdit').classList.toggle('on',panelEdit);
+  if(!panelEdit) savePanelLayout();
+  toast(panelEdit?'编辑模式：拖标题移动、拖右下角改大小':'布局已保存');
+}
+function resetPanelLayout(){
+  defaultPanelLayout(); savePanelLayout(); toast('已恢复默认布局');
+}
+
+let pDrag=null;
+canvasEl.addEventListener('pointerdown',(e)=>{
+  if(!panelEdit) return;
+  if(e.target.closest('button,input,textarea,select,label,a')) return;
+  const el=e.target.closest('.card'); if(!el) return;
+  const isRz=!!e.target.closest('.rz'), isHdr=!!e.target.closest('h2');
+  if(!isRz && !isHdr) return;
+  e.preventDefault();
+  const b=el.getBoundingClientRect();
+  pDrag={el,rz:isRz,ox:e.clientX-b.left,oy:e.clientY-b.top};
+  el.classList.add('moving'); el.style.zIndex=60;
+});
+window.addEventListener('pointermove',(e)=>{
+  if(!pDrag) return;
+  const c=canvasEl.getBoundingClientRect();
+  const W=canvasW();
+  if(pDrag.rz){
+    const w=Math.max(MINW,Math.min(W-pDrag.el.offsetLeft,e.clientX-c.left-pDrag.el.offsetLeft));
+    const h=Math.max(MINH,e.clientY-c.top-pDrag.el.offsetTop);
+    pDrag.el.style.width=w+'px'; pDrag.el.style.height=h+'px';
+  }else{
+    const x=Math.max(0,Math.min(W-60,e.clientX-c.left-pDrag.ox));
+    const y=Math.max(0,e.clientY-c.top-pDrag.oy);
+    pDrag.el.style.left=x+'px'; pDrag.el.style.top=y+'px';
+  }
+});
+window.addEventListener('pointerup',()=>{
+  if(!pDrag) return;
+  pDrag.el.classList.remove('moving'); pDrag.el.style.zIndex='';
+  pDrag=null; canvasFit(); savePanelLayout();
+});
+window.addEventListener('resize',()=>{ if(!localStorage.getItem(LAY_KEY)) defaultPanelLayout(); else canvasFit(); });
+
+loadPanelLayout();
+if (location.hash === '#edit') togglePanelEdit();
+if (location.hash === '#reset') setTimeout(resetPanelLayout, 300);
+
+
+setInterval(() => { if (!document.hidden) loadLayout(); }, 2000);
+
+renderStatus(); loadMusic(); loadRecent(); loadVols(); loadLines();
+/* 深链：#lines / #read 直接把那张卡滚到眼前 */
+if(location.hash){
+  const c = document.querySelector(`.card[data-card="${location.hash.slice(1)}"]`);
+  if(c) setTimeout(() => c.scrollIntoView({block:'center'}), 400);
+}
+setInterval(renderStatus, 5000);
+setInterval(loadRecent, 8000);
+</script>
+</body>
+</html>

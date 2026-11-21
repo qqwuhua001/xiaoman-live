@@ -1,0 +1,3187 @@
+/* 直播进程不能因为一条断线/一个 rejection 就整只退出：记日志，继续跑。 */
+process.on('unhandledRejection', (e) => {
+  console.warn('[keepalive] 未处理的 Promise 拒绝：', String(e?.message || e).slice(0, 160));
+});
+process.on('uncaughtException', (e) => {
+  console.warn('[keepalive] 未捕获异常：', String(e?.stack || e).slice(0, 300));
+});
+
+import { createServer } from 'node:http';
+import { readFile, stat } from 'node:fs/promises';
+import { createReadStream, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
+import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+
+import { ROOT, loadConfig, getConfig, updateConfig, saveConfig, publicConfig, assertPatch } from './lib/config.mjs';
+import { initStore, getState, getLifetime, recordEvent, addAiUsage, addAiEvent, addUsageOnly, pushPlaylist, nextSong, setCurrentSong, patchCurrentSong, addEventOnly, resetDay, flush, scheduleSave, faceOf } from './lib/store.mjs';
+import { beijing, isPeak, ratesFor, costOf } from './lib/pricing.mjs';
+import { chatCompletion, fetchBalance } from './lib/ai.mjs';
+import { buildMessages, buildSystemPrompt, commandReply, normalizeReply, reloadPersona } from './lib/persona.mjs';
+import { quickReply } from './lib/quick.mjs';
+import { nextLine, lineCount, anyTooClose, remember, allLines, linesByCat, isLineAvailable, setLineOff, deleteLine, editLine, lineId, reloadLines } from './lib/monologue.mjs';
+import { DanmakuBridge } from './lib/cortico.mjs';
+import { resolveTrack, listLocal, findById, trackPath, musicDir, search as musicSearch, clearCache as clearMusicCache, neteaseMember, neteaseCookieOf, takeResolveReason } from './lib/music.mjs';
+import { Radio } from './lib/radio.mjs';
+import { synthesize, listVoices, voiceMediaPath, EDGE_PRESETS, KOKORO_PRESETS, MINIMAX_PRESETS } from './lib/voice.mjs';
+import {
+  fitAttach,
+  fitTouch,
+  fitIngest,
+  fitSay,
+  fitShowExercise,
+  fitSetPlan,
+  fitStartRest,
+  fitCompleteSet,
+  fitNextBlock,
+  fitReset,
+  fitView,
+  setFitHooks,
+  fitOnline,
+} from './lib/fitness-room.mjs';
+import { gymParts, searchExercises, exerciseView, exerciseSpeech, planSpeech } from './lib/gym.mjs';
+import {
+  initNovel,
+  saveNovel,
+  novelView as storyView,
+  startNovel,
+  currentChapter,
+  chaptersOf,
+  novelInfo,
+  chapterCount,
+  endChapter,
+  beginReading,
+  nextChapter,
+  resetNovel as resetStory,
+  nextStartMs,
+  markReminded,
+  setAudio,
+  setSummary,
+  setCard,
+  buildCardMessages,
+  parseCard,
+  fallbackCard,
+  castNames,
+  setArchive,
+  addTopic,
+  topTopics,
+  getNovel,
+  listNovels,
+  loadNovelFile,
+  novelDir,
+  stopNovel,
+  buildBreakMessages,
+  buildArchiveMessages,
+  parseArchive,
+  fallbackArchive,
+  spokenTitle,
+  speechOf,
+  setAudioMs,
+  setDisplayMode,
+} from './lib/novel.mjs';
+
+const PUBLIC_DIR = path.join(ROOT, 'public');
+const PORT = Number(process.env.PORT || 8787);
+
+await loadConfig();
+await initStore();
+await initNovel(getConfig());
+const cfg0 = getConfig();
+const PORT_FINAL = Number(process.env.PORT || cfg0.port || 8787);
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.webm': 'video/webm',
+  '.mp4': 'video/mp4',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+};
+
+// ---------- SSE ----------
+const clients = new Set();
+
+// 健身房要复用故事间的点歌队列与记账，这里注入读状态的钩子（函数声明会提升，放这儿没问题）
+setFitHooks({
+  song: () => songView(),
+  stats: () => statsView(),
+  resolve: () => resolveCurrent({ force: false }),
+});
+
+function sseSend(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function broadcast(payload) {
+  for (const res of clients) {
+    try {
+      sseSend(res, payload);
+    } catch {
+      clients.delete(res);
+    }
+  }
+}
+
+// ---------- 余额 ----------
+let balance = null;
+let balanceAt = 0;
+
+async function refreshBalance(force = false) {
+  const cfg = getConfig();
+  if (!cfg.ai.apiKey) {
+    balance = null;
+    return balance;
+  }
+  if (!force && Date.now() - balanceAt < 60_000) return balance;
+  try {
+    balance = await fetchBalance({ baseUrl: cfg.ai.baseUrl, apiKey: cfg.ai.apiKey });
+    balanceAt = Date.now();
+    broadcast({ type: 'balance', balance });
+  } catch (err) {
+    console.warn('[balance]', err.message);
+    balance = { ...(balance || {}), error: err.message, at: Date.now() };
+    broadcast({ type: 'balance', balance });
+  }
+  return balance;
+}
+
+// ---------- 统计视图 ----------
+function statsView() {
+  const s = getState();
+  const cfg = getConfig();
+  const unlocked = cfg.gifts.filter((g) => s.giftBook[g.name]).length;
+  const tokensToday = s.tokensIn + s.tokensOut;
+  const life = getLifetime();
+  return {
+    date: s.date,
+    startedAt: s.startedAt,
+    income: Number(s.income.toFixed(2)),
+    spent: Number(s.spent.toFixed(4)),
+    tokensIn: s.tokensIn,
+    tokensOut: s.tokensOut,
+    tokensToday,
+    aiCalls: Number(s.aiCalls || 0),
+    tokensLifetime: life.tokens,
+    costLifetime: life.cost,
+    replies: s.replies,
+    entries: s.entries,
+    follows: s.follows,
+    likes: s.likes,
+    gifts: s.gifts,
+    giftBook: s.giftBook,
+    unlocked,
+    giftTotal: cfg.gifts.length,
+    rice: Number((cfg.riceBase + s.income * 0.1).toFixed(2)),
+    salaryTarget: cfg.salaryTarget,
+    focusMin: s.startedAt ? Math.max(0, Math.floor((Date.now() - s.startedAt) / 60000)) : 0,
+    peak: isPeak(),
+  };
+}
+
+function songView() {
+  const s = getState();
+  return {
+    currentSong: s.currentSong,
+    playlist: s.playlist,
+    queueMax: Number(getConfig().music?.queueMax ?? 3),
+    music: musicView(),
+  };
+}
+
+function musicView() {
+  const cfg = getConfig();
+  const tracks = listLocal(cfg);
+  return {
+    provider: cfg.music?.provider || 'auto',
+    dir: cfg.music?.dir || 'music',
+    apiBase: cfg.music?.apiBase || '',
+    volume: cfg.music?.volume ?? 0.2,
+    queueMax: cfg.music?.queueMax ?? 3,
+    hasCookie: Boolean(neteaseCookieOf(cfg)),
+    member: memberCache,
+    tracks: tracks.map((t) => ({ id: t.id, title: t.title, by: t.by, size: t.size, file: t.file })),
+    count: tracks.length,
+  };
+}
+
+/* 网易云会员登录态：60 秒缓存，避免每次刷新页面都去打接口 */
+let memberCache = null;
+let memberAt = 0;
+async function refreshMember({ force = false } = {}) {
+  const cfg = getConfig();
+  if (!neteaseCookieOf(cfg)) {
+    memberCache = { loggedIn: false, hasCookie: false };
+    memberAt = Date.now();
+    return memberCache;
+  }
+  if (!force && memberCache && Date.now() - memberAt < 60_000) return memberCache;
+  memberCache = await neteaseMember(cfg);
+  memberAt = Date.now();
+  return memberCache;
+}
+
+/** 把当前这首歌解析成可播放地址（点歌、切歌、页面初次加载都会走） */
+let resolvingSong = null;
+let voiceError = null;
+
+/** 合成用的参数：各引擎共用 rate/preset，MiniMax 额外读取专属配置 */
+function voiceOptsOf(cfg, extra = {}) {
+  const v = cfg.voice || {};
+  // sovits 必须在白名单里：漏了它会掉进 Windows 的 sapi 分支（powershell ENOENT），
+  // 弹幕回复、开讲提醒就全部没声
+  const engine = ['edge', 'kokoro', 'minimax', 'sovits'].includes(v.engine) ? v.engine : 'sovits';
+  return {
+    engine,
+    rate: v.rate ?? 1,
+    voice: v.voice || undefined,
+    preset: v.preset || (engine === 'kokoro' ? 'xiaobei' : engine === 'minimax' ? 'lyrical' : 'natural'),
+    speed: v.speed ?? undefined,
+    minimaxVoice: v.minimaxVoice || undefined,
+    minimaxModel: v.minimaxModel || undefined,
+    minimaxEmotion: v.minimaxEmotion || undefined,
+    minimaxBaseUrl: v.minimaxBaseUrl || undefined,
+    minimaxPitch: v.minimaxPitch ?? 0,
+    minimaxApiKey: v.minimaxApiKey || undefined,
+    ...extra,
+  };
+}
+async function resolveCurrent({ force = false } = {}) {
+  const cur = getState().currentSong;
+  if (!cur) return null;
+  if (!force && cur.url) return cur;
+  if (resolvingSong) return resolvingSong;
+  resolvingSong = (async () => {
+    const cfg = getConfig();
+    let hit = null;
+    try {
+      hit = await resolveTrack(cfg, cur.title, { by: cur.by });
+    } catch {
+      hit = null;
+    }
+    const merged = hit
+      ? {
+          ...cur,
+          url: hit.url,
+          kind: hit.kind,
+          provider: hit.provider,
+          providerId: hit.id || '',
+          durationSec: hit.durationSec || null,
+          resolvedTitle: hit.title || '',
+          resolvedBy: hit.by || '',
+          resolvedAt: Date.now(),
+        }
+      : { ...cur, url: '', kind: 'none', provider: '', lastError: '没有可用播放源', resolvedAt: Date.now() };
+    setCurrentSong(merged);
+    broadcast({ type: 'song', ...songView() });
+    if (merged.url) ensureSystemVolume().catch(() => {});
+    return merged;
+  })().finally(() => {
+    resolvingSong = null;
+  });
+  return resolvingSong;
+}
+
+function songReplyText(title, ok) {
+  const s = getState();
+  const playing = s.currentSong && s.currentSong.title !== title;
+  if (ok && playing) {
+    const pos = s.playlist.findIndex((x) => x.title === title) + 1;
+    return `收到你的点歌：《${title}》，排在队列第 ${pos || 1} 位，等《${s.currentSong.title}》放完就到它。`;
+  }
+  return ok
+    ? `收到你的点歌：《${title}》，这就放给你听。`
+    : `收到你的点歌：《${title}》，已经加入点歌队列。这首歌暂时没有可用播放源，我先记下歌名，稍后再帮你确认。`;
+}
+
+function eventView(item) {
+  const cfg = getConfig();
+  const giftInfo = item.gift ? cfg.gifts.find((g) => g.name === item.gift.name) : null;
+  return {
+    ...item,
+    gift: item.gift
+      ? {
+          ...item.gift,
+          emoji: item.gift.emoji || giftInfo?.emoji || '🎁',
+          price: item.gift.price ?? giftInfo?.price ?? 0,
+        }
+      : null,
+  };
+}
+
+function pushEvent(item) {
+  const view = eventView(item);
+  broadcast({ type: 'event', item: view });
+  broadcast({ type: 'stats', stats: statsView() });
+  return view;
+}
+
+// ---------- 发送箱（扩展轮询） ----------
+const outbox = [];
+let outboxSeq = 1;
+
+function enqueueReply(text) {
+  const item = { id: outboxSeq++, text, createdAt: Date.now(), status: 'pending' };
+  outbox.push(item);
+  if (outbox.length > 30) outbox.splice(0, outbox.length - 30);
+  return item;
+}
+
+// ---------- AI 回复流水线 ----------
+const replyQueue = [];
+let pumping = false;
+const replyTimes = [];
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function scheduleReply(job) {
+  if (!autoSpeechOn()) return;               // 总闸关着：弹幕/礼物/指令都不出声
+  const cfg = getConfig();
+  // 同一用户短时间内的连续发言只回最后一条
+  const idx = replyQueue.findIndex((j) => j.username === job.username);
+  if (idx >= 0) replyQueue.splice(idx, 1);
+  if (replyQueue.length >= 12) replyQueue.shift();
+  replyQueue.push(job);
+  pump();
+}
+
+async function pump() {
+  if (pumping) return;
+  pumping = true;
+  try {
+    while (replyQueue.length) {
+      const job = replyQueue.shift();
+      const cfg = getConfig();
+      const now = Date.now();
+      while (replyTimes.length && now - replyTimes[0] > 60_000) replyTimes.shift();
+      if (replyTimes.length >= (cfg.ai.maxRepliesPerMinute || 8)) {
+        console.log('[reply] 每分钟回复上限，跳过一条');
+        continue;
+      }
+      const wait = Math.max(0, (lastReplyAt || 0) + (cfg.ai.minReplyGapMs || 0) - Date.now());
+      if (wait > 0) await sleep(wait);
+      lastReplyAt = Date.now();
+      replyTimes.push(lastReplyAt);
+      try {
+        await doReply(job);
+      } catch (err) {
+        console.warn('[reply] 失败：', err.message);
+        pushEvent({ kind: 'system', username: '系统', text: `绫波丽噎住了：${err.message}`.slice(0, 120) });
+      }
+    }
+  } finally {
+    pumping = false;
+  }
+}
+
+let lastReplyAt = 0;
+let lastReplyText = '';
+
+// 没 Key 时的兜底。语气要和绫波丽一致：短、干、有人味，不卖萌
+const FALLBACK_REPLIES = [
+  '嗯。我在听。',
+  '等一下，我这笔还没收。',
+  '……你说什么？我刚走神了。',
+  '这个我得想想。',
+  '好。记住了。',
+  '哎。',
+  '……你这么一说，我倒不知道怎么回了。',
+];
+
+/**
+ * 调 AI：主模型（带退避重试）→ 备用模型 → 备用接口。
+ * DeepSeek 偶尔会 503「服务太忙」，直接降级成兜底稿太亏，先多试几条路。
+ */
+let aiLastError = '';
+let aiRetry = 0;
+async function aiComplete(cfg, messages, opts = {}) {
+  const retries = Number.isFinite(Number(cfg.ai.retryAttempts)) ? Number(cfg.ai.retryAttempts) : 3;
+  const tries = [];
+  const primary = {
+    label: '主模型',
+    baseUrl: cfg.ai.baseUrl,
+    apiKey: cfg.ai.apiKey,
+    model: cfg.ai.model,
+  };
+  tries.push(primary);
+  const fbModel = String(cfg.ai.fallbackModel || '').trim();
+  if (fbModel && fbModel !== cfg.ai.model) tries.push({ ...primary, label: '备用模型', model: fbModel });
+  const backup = cfg.ai.backup || {};
+  if (backup.apiKey && backup.baseUrl) {
+    tries.push({
+      label: '备用接口',
+      baseUrl: backup.baseUrl,
+      apiKey: backup.apiKey,
+      model: backup.model || cfg.ai.model,
+    });
+  }
+
+  let lastErr = null;
+  const errs = [];
+  for (const t of tries) {
+    if (!t.apiKey) continue;
+    try {
+      const res = await chatCompletion({
+        baseUrl: t.baseUrl,
+        apiKey: t.apiKey,
+        model: t.model,
+        messages,
+        temperature: opts.temperature ?? cfg.ai.temperature,
+        maxTokens: opts.maxTokens ?? cfg.ai.maxTokens,
+        timeoutMs: opts.timeoutMs ?? 45000,
+        retries,
+        topP: cfg.ai.topP,
+        frequencyPenalty: cfg.ai.frequencyPenalty,
+        presencePenalty: cfg.ai.presencePenalty,
+      });
+      aiLastError = '';
+      return { ...res, usedModel: t.model, provider: t.label };
+    } catch (err) {
+      lastErr = err;
+      errs.push(`${t.label} ${t.model}：${String(err.message).slice(0, 120)}`);
+      console.warn(`[ai] ${t.label} ${t.model} 没接上：`, err.message);
+    }
+  }
+  // 报错以第一条（主模型）为主，后面附上还试过谁
+  aiLastError = errs.join('；');
+  throw lastErr || new Error('没有可用的 AI 接口（Key 是空的）');
+}
+
+// 休息/讨论阶段用语音回复，不占聊天框；朗读阶段照常回在聊天框里
+function replyPhase() {
+  const p = getNovel()?.phase || 'idle';
+  /* 只要不是在念正文（含准备中），都用语音回观众 */
+  return p === 'reading' || p === 'preparing' ? 'chat' : 'voice';
+}
+
+let lastVoiceAt = 0;
+let idleBusy = false;
+
+async function speakReply(text) {
+  const cfg = getConfig();
+  try {
+    const out = await synthesize(text, voiceOptsOf(cfg, { maxChars: 1500 }));
+    if (out.url) lastVoiceAt = Date.now();
+    return out.url || '';
+  } catch (err) {
+    console.warn('[voice] 弹幕回复合成失败：', err.message);
+    return '';
+  }
+}
+
+async function doReply(job) {
+  const cfg = getConfig();
+  const s = getState();
+  const mode = replyPhase();
+
+  const deliver = async (text, extra = {}) => {
+    if (!text) return;
+    remember(text);
+    lastReplyText = text;
+    if (mode === 'voice') {
+      const url = await speakReply(text);
+      pushEvent(addAiEvent({ text, source: extra.source || 'ai', voiceOnly: true, voice: url }));
+      return;
+    }
+    pushEvent(addAiEvent({ text, source: extra.source || 'ai' }));
+    enqueueReply(text);
+  };
+
+  if (job.kind === 'command') {
+    const text = job.text || commandReply(job.command, job.payload || {});
+    await deliver(text, { source: 'command' });
+    return;
+  }
+
+  const question = job.text;
+  if (!question && !job.gift) return;
+
+  // 常见问题：预合成好的现成答法，0 延迟 0 成本，不占用模型
+  if (!job.gift && question) {
+    const fast = quickReply(question);
+    if (fast && isLineAvailable(fast)) {
+      await deliver(fast, { source: 'quick' });
+      return;
+    }
+  }
+
+  // 没 Key：用固定语气兜底，token 记为 0（不假装花了钱）
+  if (!cfg.ai.apiKey) {
+    const lastAi = [...s.events].reverse().find((e) => e.kind === 'ai')?.text || lastReplyText;
+    let text = job.gift
+      ? `谢谢${job.username}的${job.gift.name}，我收下了，放在小书桌上。`
+      : FALLBACK_REPLIES[Math.floor(Math.random() * FALLBACK_REPLIES.length)];
+    if (text === lastAi) {
+      const pool = FALLBACK_REPLIES.filter((t) => t !== lastAi);
+      text = pool[Math.floor(Math.random() * pool.length)] || text;
+    }
+    await deliver(text, { source: 'fallback' });
+    return;
+  }
+
+  const nv = getNovel();
+  const phase = nv?.phase || 'idle';
+  const discuss = phase === 'break' || phase === 'afterword';
+  const messages = discuss
+    ? buildBreakMessages(cfg, {
+        username: job.username,
+        text: question,
+        gift: job.gift ? job.gift.name : '',
+        chapterTitle: currentChapter()?.title || '',
+        summary: nv?.summaries?.[nv.idx] || '',
+        pastSummaries: (nv?.summaries || []).filter(Boolean),
+        topics: topTopics(5),
+      })
+    : buildMessages(cfg, s, {
+        username: job.username,
+        text: job.gift ? `送出了${job.gift.name}×${job.gift.count}` : question,
+        recent: s.events.filter((e) => e.kind === 'chat' || e.kind === 'ai').slice(-8),
+        face: faceOf(job.username),
+      });
+
+  /* 还没到开讲时间：陪聊，但别把今晚的剧情说漏 */
+  if (!discuss) {
+    const pre = idleHint(cfg);
+    if (pre) messages.push({ role: 'system', content: pre });
+  }
+
+  const broadcastNow = broadcastView();
+  if (broadcastNow.prompt) {
+    messages.push({ role: 'system', content: broadcastNow.prompt });
+  }
+
+  /* 让回复知道现在念到哪一章（模型不知道就会编成「第二十三章」） */
+  if (phase === 'reading' || phase === 'preparing') {
+    const c = currentChapter();
+    const nv2 = getNovel();
+    if (c) {
+      messages.push({
+        role: 'system',
+        content: `现在正在念《${nv2?.title || ''}》的第 ${(nv2?.idx ?? 0) + 1} 章「${c.title || ''}」（共 ${chaptersOf()?.length || 1} 章）。聊到进度就按这个说，不要编章号，也不要提前讲后面的情节。`,
+      });
+    }
+  }
+
+  const started = Date.now();
+  const raw = await aiComplete(cfg, messages, {
+    temperature: cfg.ai.temperature,
+    maxTokens: mode === 'voice' ? 260 : cfg.ai.maxTokens,
+  });
+  let text = normalizeReply(String(raw.text || ''), { maxChars: mode === 'voice' ? 80 : 70 });
+  if (!text) text = '嗯。我在。'; // 模型沉默时兜一句，别让观众干等
+  const usage = raw.usage;
+  const cost = costOf(usage, ratesFor(cfg.pricing, raw.usedModel || cfg.ai.model));
+  const ev = addAiUsage({ usage, cost, replyText: text });
+  ev.ms = Date.now() - started;
+  console.log(
+    `[ai] ${job.username} → ${text.slice(0, 30)}… in=${usage?.prompt_tokens ?? 0} out=${usage?.completion_tokens ?? 0} ¥${cost}`,
+  );
+  if (mode === 'voice') {
+    // 语音回复：不进聊天框，也不推给扩展
+    const url = await speakReply(text);
+    ev.voiceOnly = true;
+    ev.voice = url;
+    pushEvent(ev);
+    return;
+  }
+  pushEvent(ev);
+  enqueueReply(text);
+}
+
+// ---------- 指令解析 ----------
+// 观众提选题：给明天的故事投票（休息和讨论时都能提）
+function parseTopicCommand(text) {
+  const t = String(text || '').trim();
+  const m = t.match(/^(?:选题|投票|提选题|建议选题|我想看|想听)[\s:：]*(.+)$/u);
+  if (!m) return null;
+  const idea = m[1].trim().slice(0, 80);
+  return idea || null;
+}
+
+function parseStoryDisplayCommand(text) {
+  const t = String(text || '').trim().replace(/[。！？!?~～\s]+$/u, '');
+  if (/^查看角色$/u.test(t)) return 'characters';
+  if (/^查看设定$/u.test(t)) return 'settings';
+  if (/^(?:查看故事|返回故事|继续故事)$/u.test(t)) return 'story';
+  return null;
+}
+
+function parseSongCommand(text) {
+  const t = String(text || '').trim();
+  const m = t.match(/^(?:点歌|我想听|来一首|放一首|唱一首)[\s:：]*(.+)$/);
+  if (!m) return null;
+  let title = m[1]
+    .replace(/[（(].*?[)）]/g, '')
+    .replace(/(吧|呀|啊|哦|噢|啦|嘛)[。！!~～\s]*$/u, '')
+    .trim();
+  if (!title) return null;
+  return title.slice(0, 40);
+}
+
+const CUT_RE = /^(?:切歌|下一首|跳过这首|换一首|跳过)\s*[。！!~～]*$/;
+
+// ---------- 事件入口 ----------
+const dedupe = new Map();
+
+function isDuplicate(item) {
+  const key = `${item.kind}|${item.username}|${item.text}`;
+  const last = dedupe.get(key) || 0;
+  const now = Date.now();
+  if (now - last < 4000) return true;
+  dedupe.set(key, now);
+  if (dedupe.size > 500) {
+    for (const [k, v] of dedupe) if (now - v > 60_000) dedupe.delete(k);
+  }
+  return false;
+}
+
+function handleIncoming(body) {
+  const cfg = getConfig();
+  const kind = body.kind || body.type || 'chat';
+  const username = String(body.username || body.nickname || body.user || '').trim();
+  const text = String(body.text ?? body.content ?? body.msg ?? '').trim();
+
+  let gift = null;
+  if (kind === 'gift') {
+    const name = String(body.giftName || body.gift?.name || body.gift || '').trim();
+    if (!name) return { ok: false, error: '礼物缺少名称' };
+    const info = cfg.gifts.find((g) => g.name === name) || null;
+    const count = Math.max(1, Number(body.count || body.gift?.count || 1));
+    gift = {
+      name,
+      count,
+      emoji: info?.emoji || body.emoji || '🎁',
+      price: Number(body.price ?? info?.price ?? 0),
+    };
+  }
+
+  if (!['chat', 'gift', 'enter', 'follow', 'like'].includes(kind)) {
+    return { ok: false, error: '未知事件类型' };
+  }
+  if (kind === 'chat' && !text) return { ok: false, error: '弹幕内容为空' };
+
+  const item = { kind, username: username || '神秘观众', text, gift, source: body.source || 'extension' };
+  /* 礼物不做 4 秒去重：同一人连送两次同名小礼物是正常行为（重复上报由 giftId 兜底在桥里处理） */
+  if (kind !== 'gift' && isDuplicate(item)) return { ok: true, duplicate: true };
+  if (kind === 'gift') console.log(`[gift] ${item.username} 送出 ${gift.name} ×${gift.count}（¥${gift.price}）source=${item.source}`);
+
+  const ev = recordEvent({ ...item, ts: body.ts });
+  pushEvent(ev);
+
+  if (ev.kind === 'chat') {
+    const displayMode = parseStoryDisplayCommand(ev.text);
+    const topic = parseTopicCommand(ev.text);
+    const title = getConfig().music?.enabled === false ? null : parseSongCommand(ev.text);
+    if (displayMode) {
+      if (getNovel()?.file) {
+        setDisplayMode(displayMode);
+        broadcastNovel('type');
+      }
+      return { ok: true, item: eventView(ev), displayMode };
+    }
+    if (title) {
+      const queueMax = Number(getConfig().music?.queueMax ?? 3);
+      const song = pushPlaylist(title, ev.username, queueMax);
+      broadcast({ type: 'song', ...songView() });
+      ensureSystemVolume().catch(() => {});
+      if (song.full) {
+        const cur = getState().currentSong?.title;
+        scheduleReply({
+          kind: 'command',
+          username: ev.username,
+          text: `队列已经排了 ${queueMax} 首啦${cur ? `，等《${cur}》放完再点吧` : '，等前面放完再点吧'}，我记不下更多了。`,
+        });
+      } else if (song.dup) {
+        scheduleReply({
+          kind: 'command',
+          username: ev.username,
+          text: `《${song.title}》已经在队列里啦，我记着呢，等前面那几首放完就到。`,
+        });
+      } else {
+        // 先看这首有没有源，再看它是直接播还是排队
+        (async () => {
+          const cfgNow = getConfig();
+          const target = await resolveTrack(cfgNow, song.title, { title: song.title }).catch(() => null);
+          if (!target?.url) {
+            const miss = takeResolveReason();
+            const why =
+              miss.reason === 'vip'
+                ? `这首《${miss.title || song.title}》要网易云会员才能放，我现在没登录会员，先记下歌名，等登录了再点一次。`
+                : miss.reason === 'vip-expired'
+                  ? `这首《${miss.title || song.title}》我这边会员取不到地址，可能是会员过期或者登录失效了，先记下歌名。`
+                  : `收到你的点歌：《${song.title}》，已经加入点歌队列。这首歌暂时没有可用播放源，我先记下歌名，稍后再帮你确认。`;
+            scheduleReply({ kind: 'command', username: ev.username, text: why });
+            return;
+          }
+          if (song.playing) await resolveCurrent();
+          scheduleReply({ kind: 'command', username: ev.username, text: songReplyText(song.title, true) });
+        })();
+      }
+    } else if (topic) {
+      const item = addTopic(topic, ev.username);
+      broadcastNovel();
+      const rank = topTopics(12).findIndex((t) => t.text === item?.text);
+      scheduleReply({
+        kind: 'command',
+        username: ev.username,
+        text:
+          `收到你的选题：《${item?.text || topic}》，我记进明天的候选里了` +
+          (rank >= 0 ? `，现在排第 ${rank + 1} 位。` : '。'),
+      });
+    } else if (getConfig().music?.enabled !== false && CUT_RE.test(ev.text)) {
+      (async () => {
+        const cur = nextSong();
+        if (cur) await resolveCurrent({ force: true });
+        broadcast({ type: 'song', ...songView() });
+        scheduleReply({ kind: 'command', command: 'next', payload: { title: cur?.title }, username: ev.username });
+      })();
+    } else if (cfg.reply.auto && cfg.ai.enabled && !fitOnline()) {
+      // 健身房直播间开着的时候，弹幕归健身教练回，故事间不再抢话（也不烧 token）
+      scheduleReply({ kind: 'chat', username: ev.username, text: ev.text });
+    }
+  } else if (ev.kind === 'gift' && cfg.reply.auto && cfg.ai.enabled && cfg.ai.replyToGifts) {
+    scheduleReply({ kind: 'chat', username: ev.username, text: '', gift: ev.gift });
+  } else if (ev.kind === 'enter') {
+    greetOnEnter(ev.username);
+    noteEnterBurst();
+  } else if (ev.kind === 'follow') {
+    sayFollowLine(ev.username);
+  }
+  return { ok: true, item: eventView(ev) };
+}
+
+/* ---------- 进直播间打招呼：一有人进来就开口 ---------- */
+const greetedAt = new Map();
+const greetQueue = [];
+let greetRunning = false;
+
+/* 招呼语：模板已迁进 data/lines.json（cat = greet_new / greet_known / greet_old），
+   面板里可以逐句开关、删除，删光了就不招呼。{name} 是观众昵称占位。 */
+
+/* 招呼语防重复：按"句式"去重（名字不同不算换句），同一句 20 分钟内不再说 */
+const GREET_COOLDOWN_MS = 20 * 60 * 1000;
+const greetSaidAt = new Map();
+
+function greetText(name, face) {
+  const visits = Number(face?.visit || 1);
+  const tier = visits >= 6 ? 'old' : visits >= 2 ? 'known' : 'new';
+  const pool = linesByCat(`greet_${tier}`);
+  if (!pool.length) return '';                 // 这个档位的招呼被删/关光了
+  const now = Date.now();
+  const fresh = pool.filter((l) => now - (greetSaidAt.get(l.id) || 0) > GREET_COOLDOWN_MS);
+  let pick;
+  if (fresh.length) {
+    pick = fresh[Math.floor(Math.random() * fresh.length)];
+  } else {
+    pick = pool.reduce((a, b) => ((greetSaidAt.get(a.id) || 0) <= (greetSaidAt.get(b.id) || 0) ? a : b));
+  }
+  greetSaidAt.set(pick.id, now);
+  if (greetSaidAt.size > 300) {
+    for (const [k, v] of greetSaidAt) if (now - v > GREET_COOLDOWN_MS * 3) greetSaidAt.delete(k);
+  }
+  return pick.text.replace(/\{name\}/g, String(name || '').trim());
+}
+
+/* ---------- 关直播窗口（声音一起停） ---------- */
+async function closeLiveWindow() {
+  const uid = process.getuid();
+  try {
+    radioWasOn = getConfig().radio?.enabled !== false;
+    radio.pause();
+    updateConfig({ radio: { enabled: false } });
+    await saveConfig();
+  } catch { /* 没电台就算了 */ }
+  broadcast({ type: 'control', action: 'stop' });
+  // bootout 只停 launchd 任务，窗口是真独立 app，得再送一刀才真关得掉
+  execFile('/bin/sh', ['-c',
+    `launchctl bootout gui/${uid}/com.xiaoman.window 2>/dev/null; ` +
+    `/usr/bin/pkill -f "XiaomanWindow.app/Contents/MacOS/XiaomanWindow" 2>/dev/null; true`,
+  ], (err) => {
+    console.log('[control] 关窗口', err ? String(err.message).slice(0, 60) : 'ok');
+  });
+}
+
+/* ---------- 进人突增：45 秒内进来 4 个以上，说一句留人的话 ---------- */
+const enterStamps = [];
+let lastHoldAt = 0;
+let holdBusy = false;
+
+function noteEnterBurst() {
+  if (!autoSpeechOn()) return;
+  const now = Date.now();
+  enterStamps.push(now);
+  while (enterStamps.length && now - enterStamps[0] > 45000) enterStamps.shift();
+  if (enterStamps.length < 4) return;
+  if (holdBusy || now - lastHoldAt < 180000) return;
+  holdBusy = true;
+  lastHoldAt = now;
+  (async () => {
+    try {
+      const line = nextLine({ cat: 'hold' });
+      if (!line) return;
+      const url = await speakReply(line);
+      pushEvent(addAiEvent({ text: line, source: 'hold', voiceOnly: true, voice: url }));
+      console.log(`[hold] 进人突增 -> ${line}`);
+    } catch (e) {
+      console.warn('[hold] 播报失败:', String(e?.message || e).slice(0, 80));
+    } finally {
+      holdBusy = false;
+    }
+  })();
+}
+
+/* ---------- 关注：用台词库的 follow 类说一句，20 秒最多一句 ---------- */
+let lastFollowAt = 0;
+let followBusy = false;
+
+async function sayFollowLine(name) {
+  const cfg = getConfig();
+  if (cfg.reply && cfg.reply.auto === false) return;
+  if (!autoSpeechOn()) return;
+  if (followBusy) return;
+  if (Date.now() - lastFollowAt < 20000) return;
+  const line = nextLine({ cat: 'follow' });
+  if (!line) return;
+  followBusy = true;
+  lastFollowAt = Date.now();
+  try {
+    const url = await speakReply(line);
+    pushEvent(addAiEvent({ text: line, source: 'follow', voiceOnly: true, voice: url }));
+    console.log(`[follow] ${name} -> ${line}`);
+  } catch (e) {
+    console.warn('[follow] 播报失败:', String(e?.message || e).slice(0, 80));
+  } finally {
+    followBusy = false;
+  }
+}
+
+async function greetPump() {
+  if (greetRunning) return;
+  greetRunning = true;
+  try {
+    while (greetQueue.length) {
+      const job = greetQueue.shift();
+      const cfg = getConfig();
+      const gapMs = Math.max(0, Number(cfg.greet?.minGapMs ?? 6000));
+      const wait = job.at + gapMs - Date.now();
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      const text = greetText(job.name, faceOf(job.name));
+      if (!text) continue;
+      const url = await speakReply(text);
+      pushEvent(addAiEvent({ text, source: 'enter', voiceOnly: true, voice: url }));
+      job.at = Date.now();
+      console.log(`[greet] ${job.name} -> ${text}`);
+    }
+  } finally {
+    greetRunning = false;
+  }
+}
+
+function greetOnEnter(name) {
+  const cfg = getConfig();
+  if (cfg.greet?.enabled === false) return;
+  if (!autoSpeechOn()) return;
+  const who = String(name || '').trim();
+  if (!who || who === '神秘观众') return;
+  const now = Date.now();
+  const perUser = Math.max(60, Number(cfg.greet?.perUserSec ?? 900)) * 1000;
+  if (now - (greetedAt.get(who) || 0) < perUser) return; // 同一个人别反复招呼
+  greetedAt.set(who, now);
+  if (greetedAt.size > 800) {
+    // 只留最近的一批，避免常驻直播把内存越攒越大
+    const cutoff = now - perUser;
+    for (const [k, v] of greetedAt) if (v < cutoff) greetedAt.delete(k);
+  }
+  const maxQ = Math.max(1, Number(cfg.greet?.maxQueued ?? 3));
+  if (greetQueue.length >= maxQ) greetQueue.shift();
+  greetQueue.push({ name: who, at: now });
+  greetPump().catch((e) => console.warn('[greet] 失败：', String(e?.message || e).slice(0, 100)));
+}
+
+// ---------- 演示模式 ----------
+const DEMO_USERS = ['鲸鱼小饼干', '不睡觉的猫', '七月', '晚风', '小行星', 'Rin', '白桃汽水', '阿离'];
+const DEMO_TEXTS = ['绫波丽你好呀', '今天也要加油写字！', '主播好可爱', '点歌 晴天', '点歌 平凡之路', '你是真人吗', '晚点还播吗', '我辛苦了'];
+const DEMO_GIFTS = ['小心心', '玫瑰', '鲜花', '比心', '棒棒糖'];
+// ---- 抖音弹幕直连（cortico 移植版，不用浏览器） ----
+const bridge = new DanmakuBridge();
+
+function danmakuView() {
+  const cfg = getConfig();
+  const s = bridge.status();
+  return {
+    ...s,
+    mode: cfg.danmaku?.mode || 'auto',
+    savedRoomId: cfg.danmaku?.roomId || cfg.roomId || '',
+    hasCookie: Boolean(cfg.danmaku?.cookie),
+  };
+}
+
+bridge.on('event', (ev) => {
+  const info = ev.kind === 'gift' ? getConfig().gifts.find((g) => g.name === ev.giftName) : null;
+  // 配置里没这个礼物时，按「钻石 ÷ 10 = 元」估一个价（抖音 1 抖币 ≈ 0.1 元）
+  const diamond = Number(ev.diamond || 0);
+  const estimate = diamond >= 10 ? Math.round((diamond / 10) * 100) / 100 : 0;
+  handleIncoming({
+    kind: ev.kind,
+    username: ev.username,
+    text: ev.text,
+    giftName: ev.giftName,
+    count: ev.count,
+    price: info ? info.price : estimate,
+    source: 'cortico',
+  });
+  // 健身直播间也吃同一路弹幕（它没开的时候自己会忽略）
+  fitIngest({
+    kind: ev.kind,
+    username: ev.username,
+    text: ev.text,
+    giftName: ev.giftName,
+    count: ev.count,
+    price: info ? info.price : estimate,
+    source: 'cortico',
+  }).catch((e) => console.warn('[fitness] 弹幕处理失败', String(e.message).slice(0, 120)));
+});
+
+bridge.on('status', () => {
+  broadcast({ type: 'danmaku', danmaku: danmakuView() });
+});
+
+async function startDanmaku(roomId) {
+  const rid = String(roomId || '').trim();
+  if (!rid) throw new Error('先填直播间号');
+  updateConfig({ roomId: rid, danmaku: { ...(getConfig().danmaku || {}), roomId: rid } });
+  await saveConfig();
+  await bridge.start(rid, { cookie: getConfig().danmaku?.cookie || '' });
+  broadcast({ type: 'danmaku', danmaku: danmakuView() });
+  broadcast({ type: 'config', config: publicConfig() });
+  console.log(`  📡 弹幕直连 -> ${rid} (${bridge.state})`);
+  return danmakuView();
+}
+
+function stopDanmaku() {
+  bridge.stop();
+  broadcast({ type: 'danmaku', danmaku: danmakuView() });
+  return danmakuView();
+}
+
+/* ---------- 总闸：自动说话 ----------
+ * 面板上一个开关：关掉后自语、搭话、招呼、留人、关注、答谢、弹幕回复全部停，
+ * 只留手动「让她说」和长文朗读；长文朗读进行中也自动让路（不然会互相插嘴）。 */
+function autoSpeechOn() {
+  const c = getConfig();
+  if (c.auto && c.auto.speak === false) return false;
+  if (readJob) return false;
+  return true;
+}
+
+/* ---------- 长文朗读：按句切、逐句合成、边合成边念 ----------
+ * 页面每放完一句就 POST /api/control/read/next 领下一句，
+ * 第一句约 3 秒出来，不用等整篇合成完。 */
+let readJob = null;
+
+function splitRead(text) {
+  /* 合成器每句固定要 8~12 秒（模型推理，跟句子长短关系不大），所以按 40~100 字合并成段：
+     599 字的文章从 45 句降到 8 句左右，整篇从十几分钟压到两分钟上下，句间也不会大段空着。 */
+  const clean = String(text || '').replace(/\r/g, '').replace(/\n{2,}/g, '\n').trim();
+  const out = [];
+  let cur = '';
+  const pieces = clean.split(/(?<=[。！？；!?…])/);
+  for (const raw of pieces) {
+    const p = raw.replace(/\s*\n\s*/g, ' ').trim();
+    if (!p) continue;
+    cur += p;
+    if (cur.length >= 90) {
+      while (cur.length > 110) { out.push(cur.slice(0, 110).trim()); cur = cur.slice(110); }
+      if (cur.length >= 90) { out.push(cur.trim()); cur = ''; }
+    }
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out.filter(Boolean);
+}
+
+function readView() {
+  if (!readJob) return { running: false, idx: 0, total: 0, title: '' };
+  return {
+    running: true,
+    idx: readJob.idx,
+    total: readJob.chunks.length,
+    title: readJob.title || '',
+    startedAt: readJob.startedAt,
+  };
+}
+
+let readBusy = false;
+let readFallback = null;
+
+/* 页面每放完一句会来领下一句；万一页面卡住/窗口关了没来领，
+   这个兜底定时器按字数估个时长，到点自己往下走，不至于整篇停在一半。 */
+let lastReadPollAt = 0;   // 页面最近一次来领/查朗读进度的时间
+
+function armReadFallback(chunk) {
+  clearTimeout(readFallback);
+  const ms = Math.min(90000, Math.max(20000, Math.round(chunk.length * 500)));
+  readFallback = setTimeout(() => {
+    readFallback = null;
+    /* 页面还在正常领句子（25 秒内来过），就不用兜底插一脚，免得和真实播放抢 */
+    if (Date.now() - lastReadPollAt < 25000) { armReadFallback(chunk); return; }
+    nextRead().catch((e) => console.warn('[read] 兜底推进失败：', String(e?.message || e).slice(0, 80)));
+  }, ms);
+}
+
+async function nextRead() {
+  if (readBusy) return { ok: true, busy: true, ...readView() };   // 防并发领同一句
+  const job = readJob;
+  if (!job) { clearTimeout(readFallback); readFallback = null; return { ok: true, done: true, running: false }; }
+  readBusy = true;
+  while (job.idx < job.chunks.length) {
+    const chunk = job.chunks[job.idx];
+    /* 每 8 段（约 4 分钟）插一句短的，像抬头看一眼：纯念稿最容易掉人。
+       优先挑已经预合成过的短句，命中缓存就是 0 等待。 */
+    if (job.idx > 0 && job.idx % 8 === 0) {
+      const pool = linesByCat('hold').filter((l) => isLineAvailable(l));
+      const line = pool.length ? pool[job.idx % pool.length].text : '';
+      if (line) {
+        const bu = await speakReply(line);
+        if (bu) pushEvent(addAiEvent({ text: line, source: 'read', voiceOnly: false, voice: bu }));
+      }
+      broadcast({ type: 'read', read: readView() });
+    }
+    job.idx += 1;
+    const url = await speakReply(chunk);
+    if (readJob !== job) { readBusy = false; return { ok: true, stopped: true, running: false }; }  // 中途被停
+    if (!url) { console.warn('[read] 这句没合成出来，跳过：', chunk.slice(0, 20)); continue; }
+    pushEvent(addAiEvent({ text: chunk, source: 'read', voiceOnly: true, voice: url }));
+    armReadFallback(chunk);
+    /* 当前句在播的时候，先把下一句合成出来（落进 voice_cache），下一句就是 0 延迟 */
+    const pre = job.chunks[job.idx];
+    if (pre && pre.length < 120) speakReply(pre).catch(() => {});
+    broadcast({ type: 'read', read: readView() });
+    readBusy = false;
+    if (job.idx >= job.chunks.length) {
+      /* 最后一句已经发出去在播了，收工别等页面来领（以前要等 30~90 秒兜底才变“读完”）。 */
+      setTimeout(() => {
+        if (readJob !== job) return;
+        readJob = null;
+        clearTimeout(readFallback);
+        readFallback = null;
+        broadcast({ type: 'read', read: { running: false, done: true, total: job.chunks.length } });
+      }, 2500);
+    }
+    return { ok: true, idx: job.idx, total: job.chunks.length, done: job.idx >= job.chunks.length };
+  }
+  readJob = null;
+  clearTimeout(readFallback);
+  readFallback = null;
+  readBusy = false;
+  broadcast({ type: 'read', read: { running: false, done: true, total: job.chunks.length } });
+  return { ok: true, done: true, running: false, total: job.chunks.length };
+}
+
+/* 预生成：先把整篇合成进 voice_cache，开播时就是零等待、不断顿 */
+let readPrem = { running: false, idx: 0, total: 0, title: '', done: 0 };
+async function premakeRead(text, title) {
+  const chunks = splitRead(text);
+  if (!chunks.length) throw new Error('没有可念的内容');
+  readPrem = { running: true, idx: 0, total: chunks.length, title: title || '', done: 0 };
+  (async () => {
+    for (const c of chunks) {
+      try {
+        const url = await speakReply(c);
+        if (url) readPrem.done += 1;
+      } catch { /* 单句失败跳过去，别整篇停 */ }
+      readPrem.idx += 1;
+    }
+    readPrem.running = false;
+    console.log(`[read] 预生成完成：${readPrem.done}/${readPrem.total} 段${readPrem.title ? ' · ' + readPrem.title : ''}`);
+  })();
+  return { ...readPrem };
+}
+
+async function startRead(text, title) {
+  stopRead({ silent: true });
+  const chunks = splitRead(text);
+  if (!chunks.length) return { ok: false, error: '没有可念的内容' };
+  readJob = { chunks, idx: 0, title: title || '', startedAt: Date.now() };
+  console.log(`[read] 开始朗读：${chunks.length} 段 / ${String(text).length} 字${title ? ' · ' + title : ''}`);
+  broadcast({ type: 'read', read: readView() });
+  /* 第一段合成要十几秒，别让面板干等一个 HTTP 请求：先把“已开读”回给页面，第一段自己合成完再播 */
+  nextRead().catch((e) => console.warn('[read] 第一段失败：', String(e?.message || e).slice(0, 80)));
+  return { ok: true, total: chunks.length, running: true, idx: 0 };
+}
+
+function stopRead({ silent = false } = {}) {
+  const had = !!readJob;
+  readJob = null;
+  readBusy = false;
+  clearTimeout(readFallback);
+  readFallback = null;
+  if (!silent) broadcast({ type: 'read', read: { running: false, stopped: true } });
+  return had;
+}
+
+/* ---------- 空闲自语：没人说话时，让她自己念叨两句、动一动 ---------- */
+let idleTimer = null;
+let lastIdleAt = 0;
+let lastReachOutAt = 0;   // 上次主动搭话（长时间没人发弹幕时用）
+let monoPaused = false;   // 控制板按「停止说话」时置 true，自言自语全部让路
+const idleAt = [];
+const BOOT_AT = Date.now();   // 本次启动时刻：从来没有真人事件时，从这里开始算静默
+
+/** 最后一条真人事件（进房/弹幕/礼物/关注/点赞）的时间；只算真人，不算她自己的 ai 事件 */
+function lastHumanTs() {
+  const s = getState();
+  const evs = s.events || [];
+  for (let i = evs.length - 1; i >= 0; i -= 1) {
+    const e = evs[i];
+    if (e && e.kind && e.kind !== 'ai') return Number(e.ts) || 0;
+  }
+  return 0;
+}
+
+/** 最近 N 秒内有没有真人动静（进房 / 弹幕 / 礼物）——只有这时才允许模型现编 */
+function hasAudience(sec = 300) {
+  const s = getState();
+  const now = Date.now();
+  return (s.events || []).some((e) => e.kind && e.kind !== 'ai' && now - (Number(e.ts) || 0) < sec * 1000);
+}
+
+function lastActivityAt() {
+  const s = getState();
+  const ev = s.events && s.events.length ? s.events[s.events.length - 1] : null;
+  return Math.max(Number(ev?.ts) || 0, lastReplyAt || 0);
+}
+
+/** 自言自语频率档位：控制板五个按钮直接写它 */
+const IDLE_MODES = {
+  off:    { label: '不说',   enabled: false, waitSec: 40, minGapSec: 45,  perHour: 45  },
+  slow:   { label: '偶尔',   enabled: true,  waitSec: 90, minGapSec: 150, perHour: 18  },
+  normal: { label: '正常',   enabled: true,  waitSec: 40, minGapSec: 45,  perHour: 45  },
+  fast:   { label: '勤快',   enabled: true,  waitSec: 15, minGapSec: 20,  perHour: 120 },
+  chatty: { label: '一直念', enabled: true,  waitSec: 3,  minGapSec: 6,   perHour: 400 },
+};
+
+async function idleMutter() {
+  const cfg = getConfig();
+  const idle = cfg.idle || {};
+  if (monoPaused) return;                    // 控制板暂停中，一句都不说
+  if (!autoSpeechOn()) return;               // 总闸关着 / 正在朗读
+  if (idle.enabled === false) return;
+  if (pumping || replyQueue.length) return; // 有人的话还没回完，先别插嘴
+  if (idle.onlyLive !== false && bridge.status().state !== 'live') return;
+  const now = Date.now();
+  if (now - lastVoiceAt < 7000) return;      // 上一句还在播，别插嘴
+  if (now - lastActivityAt() < Math.max(3, Number(idle.waitSec ?? 40)) * 1000) return;
+  if (now - lastIdleAt < Math.max(4, Number(idle.minGapSec ?? 45)) * 1000) return;
+  while (idleAt.length && now - idleAt[0] > 3_600_000) idleAt.shift();
+  if (idleAt.length >= Math.max(1, Number(idle.perHour ?? 45))) return;
+
+  const s = getState();
+  const recent = s.events.filter((e) => e.kind === 'ai').slice(-6);
+  const said = s.events.filter((e) => e.kind === 'ai').map((e) => String(e.text || '')).slice(-120);
+  const started = Date.now();
+
+  let text = '';
+  let usage = null;
+  let usedModel = '';
+  // 有人在（最近 audienceSec 内有进房/弹幕/礼物）才让模型现编；没人时全部走本地台词库
+  const audience = hasAudience(Number(idle.audienceSec ?? 300));
+  const modelChance = audience ? Math.min(1, Math.max(0, Number(idle.modelChanceWhenAudience ?? 0.85))) : 0;
+
+  /* ---- 长时间没人发弹幕：不念自语，改成主动搭一句 ---- */
+  const lastHuman = lastHumanTs();
+  const quietSec = Math.floor((now - (lastHuman || BOOT_AT)) / 1000);
+  const reachAfterSec = Math.max(120, Number(idle.reachAfterSec ?? 480));
+  const reachGapSec = Math.max(180, Number(idle.reachGapSec ?? 600));
+  const wantReach = quietSec >= reachAfterSec && now - lastReachOutAt > reachGapSec * 1000;
+
+  const wantModel = (wantReach || Math.random() < modelChance) && cfg.ai?.enabled && cfg.ai?.apiKey;
+
+  if (wantModel) {
+    try {
+      const messages = [
+        { role: 'system', content: buildSystemPrompt(cfg, s) },
+        {
+          role: 'system',
+          content: wantReach
+            ? '直播间已经安静了很久：人还在，但没人发弹幕。你别念自语，主动和人搭一句。' +
+              '像画室里抬头看一眼：可以说一句自己画到哪儿了再顺口问一句，也可以直接问一句很短的（最近在忙什么 / 今天怎么这么静 / 你们那儿天气怎么样）。' +
+              '15~35 个字，1~2 句，最多问一个问号，口气平常，不要热情过头。' +
+              '不许念欢迎词、不许喊「有人在吗」「大家还在吗」，不许提礼物、关注、进直播间、涨粉，也不许说「谢谢某某」。' +
+              '不重复最近说过的句子。只输出这一句搭话，必须出现问号，或明确出现「你 / 你们」，否则不算数。'
+            : '直播间这会儿没人说话，你在画室里画素描，不站起、不走动、不离开座位。做一件手边的小事，随口说一句：' +
+              '铅笔在纸上走、抬头看窗上的光、把橡皮屑吹掉、用指节量一下比例、报一句纸上那件东西的名字。' +
+              '12~30 个字，1~2 句，像自言自语，不要播音腔。' +
+              '可以偶尔轻轻问观众一句很短的话（「今天外面下雨吗」「你们那儿冷不冷」），但三句里最多一句是问句，也不要喊「有人在吗」。' +
+              '这一句是自言自语，不是回答：不许提礼物、关注、进直播间、涨粉这些直播用语，也不许说「谢谢某某」；那些话只在真的有人送礼/关注/进来时才说。' +
+              '不重复最近说过的句子，不用「我一直在等你们」这种话。',
+        },
+      ];
+      for (const r of recent) messages.push({ role: 'assistant', content: r.text });
+      const raw = await aiComplete(cfg, messages, {
+        temperature: Math.max(0.9, Number(cfg.ai.temperature) || 1),
+        maxTokens: 90,
+      });
+      const t = normalizeReply(String(raw.text || ''), { maxChars: 50 });
+      if (t && !said.includes(t) && !anyTooClose(t, said)) {
+        text = t;
+        usage = raw.usage;
+        usedModel = raw.usedModel || cfg.ai.model;
+      }
+    } catch (e) {
+      console.warn('[idle] 模型没接上，换台词库：', String(e?.message || e).slice(0, 80));
+    }
+  }
+
+  /* 模型常常顺手念成自语（没问号、没称呼），那样就不是"搭话"，退回台词库的搭话句 */
+  if (wantReach && text && !/[？?]|你/.test(text)) {
+    console.log('[reach] 模型给了自语，改台词库');
+    text = '';
+  }
+  if (!text) text = wantReach ? (nextLine({ cat: 'reach', recent: said }) || nextLine({ recent: said })) : nextLine({ recent: said });
+  if (!text) return;
+  if (wantReach) lastReachOutAt = now;
+
+  const cost = usage ? costOf(usage, ratesFor(cfg.pricing, usedModel || cfg.ai.model)) : 0;
+  const ev = addAiUsage({ usage, cost, replyText: text });
+  ev.ms = Date.now() - started;
+  ev.voiceOnly = true;
+  ev.voice = await speakReply(text);
+  ev.source = 'idle';
+  pushEvent(ev);
+  lastIdleAt = now;
+  idleAt.push(now);
+  console.log(`[${wantReach ? 'reach' : 'idle'}] ${wantModel ? '模型' : '台词库'}${wantReach ? `·静了 ${quietSec}s` : ''} -> ${text.slice(0, 26)}`);
+}
+
+function startIdleWatch() {
+  if (idleTimer) clearInterval(idleTimer);
+  idleTimer = setInterval(() => {
+    if (idleBusy) return;                    // 上一句还在合成，别叠着跑
+    idleBusy = true;
+    idleMutter()
+      .catch((e) => console.warn('[idle] 失败：', String(e?.message || e).slice(0, 120)))
+      .finally(() => { idleBusy = false; });
+  }, 12000);
+}
+startIdleWatch();
+
+let demoTimer = null;
+
+function stopDemo() {
+  if (demoTimer) clearInterval(demoTimer);
+  demoTimer = null;
+}
+
+function startDemo() {
+  stopDemo();
+  demoTimer = setInterval(() => {
+    const r = Math.random();
+    if (r < 0.15) {
+      handleIncoming({ kind: 'enter', username: DEMO_USERS[Math.floor(Math.random() * DEMO_USERS.length)] });
+    } else if (r < 0.3) {
+      const g = DEMO_GIFTS[Math.floor(Math.random() * DEMO_GIFTS.length)];
+      handleIncoming({
+        kind: 'gift',
+        username: DEMO_USERS[Math.floor(Math.random() * DEMO_USERS.length)],
+        giftName: g,
+        count: 1 + Math.floor(Math.random() * 3),
+      });
+    } else {
+      handleIncoming({
+        kind: 'chat',
+        username: DEMO_USERS[Math.floor(Math.random() * DEMO_USERS.length)],
+        text: DEMO_TEXTS[Math.floor(Math.random() * DEMO_TEXTS.length)],
+      });
+    }
+  }, 9000);
+}
+
+// ---------- 念小说（章节驱动，不用固定排期） ----------
+let novelBusy = false;
+let novelRetry = 0;
+let novelTimer = null;
+
+/* ---------- 系统音量自检 ----------
+ * 这台机器的 USB 声卡闲下来会把主音量重置到很低（实测见过 0.02 / 0.06），
+ * 页面里怎么调都没用 —— 所以每次开始放歌/念书时，顺手确认一下系统音量，
+ * 低于 0.35 就用音量键抬到 0.6。只抬不降；三分钟内最多跑一次。 */
+let sysVolAt = 0;
+let sysVolBusy = false;
+let sysVolLast = '';
+
+function ensureSystemVolume({ force = false } = {}) {
+  if (process.platform !== 'win32') return Promise.resolve(null);
+  const cfg = getConfig();
+  /* 默认关：系统音量是使用者自己调的，别自作主张改它 —— 要在操作台勾上才自动抬 */
+  if (!force && !cfg.audio?.autoVolume) return Promise.resolve(null);
+  const now = Date.now();
+  if (!force && (sysVolBusy || now - sysVolAt < 180_000)) return Promise.resolve(null);
+  const target = Math.min(1, Math.max(0.1, Number(cfg.audio?.target ?? 0.6) || 0.6));
+  const script = path.join(ROOT, 'tools', 'audio-loud.ps1');
+  if (!existsSync(script)) return Promise.resolve(null);
+  sysVolAt = now;
+  sysVolBusy = true;
+  return new Promise((resolve) => {
+    execFile(
+      'powershell',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, String(target)],
+      { timeout: 90000, windowsHide: true },
+      (err, stdout) => {
+        sysVolBusy = false;
+        const line = String(stdout || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
+        sysVolLast = err ? `失败：${err.message}` : line;
+        if (!err && line) console.log(`[audio] ${line}`);
+        resolve(line || null);
+      },
+    );
+  });
+}
+
+function novelDirLabel() {
+  return novelDir(getConfig()).replace(ROOT, '.');
+}
+
+function broadcastNovel(mood) {
+  broadcast({ type: 'story', story: storyView(getConfig()), mood: mood || null });
+  broadcast({ type: 'stats', stats: statsView() });
+}
+
+/* ---------- 直播时段 / 场景调度 ---------- */
+let liveMode = null;
+let liveModeChangedAt = 0;
+
+function minutesOfDay(value) {
+  const m = String(value || '').trim().match(/^(\d{1,2}):([0-5]\d)$/);
+  if (!m) return null;
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  return hour >= 24 ? null : hour * 60 + minute;
+}
+
+function clockMinute(now, timezone = 'Asia/Shanghai') {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: timezone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(now);
+    const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+    const minute = Number(parts.find((p) => p.type === 'minute')?.value);
+    if (Number.isFinite(hour) && Number.isFinite(minute)) return hour * 60 + minute;
+  } catch {
+    /* 配置了无效时区时回退到系统本地时间。 */
+  }
+  return now.getHours() * 60 + now.getMinutes();
+}
+
+function scheduleItemAt(items, now = new Date(), timezone = 'Asia/Shanghai') {
+  const minute = clockMinute(now, timezone);
+  for (const item of Array.isArray(items) ? items : []) {
+    const start = minutesOfDay(item.start);
+    const end = minutesOfDay(item.end);
+    if (start == null || end == null || start === end) continue;
+    const active = start < end ? minute >= start && minute < end : minute >= start || minute < end;
+    if (active) return item;
+  }
+  return null;
+}
+
+function nextScheduleItem(items, now = new Date(), timezone = 'Asia/Shanghai') {
+  const minuteNow = clockMinute(now, timezone);
+  const candidates = (Array.isArray(items) ? items : [])
+    .map((item) => ({ item, start: minutesOfDay(item.start) }))
+    .filter((x) => x.start != null)
+    .map((x) => ({ ...x, delta: (x.start - minuteNow + 1440) % 1440 }));
+  candidates.sort((a, b) => a.delta - b.delta);
+  return candidates[0]?.item || null;
+}
+
+function broadcastView() {
+  const cfg = getConfig();
+  const b = cfg.broadcast || {};
+  const item = scheduleItemAt(b.schedule, new Date(), b.timezone);
+  /* forced：后台手动把某间推上台，优先级高于时段表；auto 就是 null。 */
+  const forced = b.forced === 'fitness' || b.forced === 'story' ? b.forced : null;
+  const mode = forced || (b.enabled ? String(item?.mode || b.defaultMode || 'story') : 'story');
+  const title = forced ? (forced === 'fitness' ? '健身指导' : '故事直播') : item?.title || (mode === 'fitness' ? '健身指导' : '故事直播');
+  const next = b.enabled ? nextScheduleItem(b.schedule, new Date(), b.timezone) : null;
+  return {
+    enabled: b.enabled === true,
+    mode,
+    forced,
+    title,
+    scheduleId: item?.id || null,
+    start: item?.start || null,
+    end: item?.end || null,
+    prompt: item?.prompt || '',
+    next: next ? { id: next.id || null, mode: next.mode || null, title: next.title || '', start: next.start || '' } : null,
+    changedAt: liveModeChangedAt || null,
+  };
+}
+
+function applyBroadcastMode({ force = false } = {}) {
+  const view = broadcastView();
+  if (!force && liveMode === view.mode) return view;
+  const previous = liveMode;
+  liveMode = view.mode;
+  liveModeChangedAt = Date.now();
+  if (previous && previous !== view.mode) {
+    /* 切到健身时暂停故事朗读，避免两个场景同时出声。 */
+    if (view.mode === 'fitness') {
+      clearTimeout(novelTimer);
+      novelTimer = null;
+      if (getNovel()?.phase === 'reading' || getNovel()?.phase === 'preparing') {
+        stopNovel();
+        broadcastNovel('idle');
+      }
+    }
+    pushEvent({ kind: 'system', username: '系统', text: `直播时段已切换：${view.title}` });
+  }
+  broadcast({ type: 'broadcast', broadcast: view });
+  return view;
+}
+
+function broadcastScheduleTick() {
+  const view = applyBroadcastMode();
+  /* 故事时段交给已有的小说定时器；健身时段只展示模式状态。 */
+  return view;
+}
+
+function scheduleNovel(delay) {
+  clearTimeout(novelTimer);
+  novelTimer = null;
+  const cfg = getConfig();
+  if (!cfg.novel?.enabled || !cfg.novel?.auto || novelBusy) return;
+  novelTimer = setTimeout(() => {
+    novelStep().catch((err) => console.warn('[novel]', err.message));
+  }, Math.min(Math.max(400, delay ?? 600), 60 * 60_000));
+}
+
+/* ---------------- 定时开讲 ---------------- */
+
+const REMIND_BEFORE_MS = 5 * 60_000;
+
+function fmtHm(ms) {
+  const d = new Date(ms);
+  return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** 今晚这场要念的书（还没开讲时用来预告，不改变任何状态） */
+function upcomingBook(cfg) {
+  const top = listNovels(cfg)[0];
+  if (!top) return null;
+  let chapters = Number(top.chapters) || 0;
+  let title = top.title || '';
+  if (!chapters) {
+    try {
+      const f = loadNovelFile(cfg, top.name);
+      chapters = f?.chapters?.length || 0;
+      title = f?.title || title;
+    } catch {
+      /* 读不到就算了，预告里就不书说几章 */
+    }
+  }
+  return { title: title || '今晚这本', chapters };
+}
+
+/** 还没到开讲时间时给模型的一句提示（陪聊、别剧透） */
+function idleHint(cfg) {
+  if (!cfg.novel?.enabled) return '';
+  const nv = getNovel();
+  const phase = nv?.phase || 'idle';
+  if (phase !== 'idle' && phase !== 'done') return '';
+  const at = nextStartMs(cfg);
+  if (!at) return '';
+  const book = upcomingBook(cfg);
+  const desc = book
+    ? `今晚念《${book.title}》${book.chapters ? `，一共 ${book.chapters} 章` : ''}`
+    : '今晚这本还没落到书桌上';
+  return (
+    `现在还没开讲（${fmtHm(at)} 开始，${desc}）。这几分钟就是陪观众聊天：聊日常、聊上一本听了什么、催他们点歌都行。` +
+    `绝对不要提前讲今晚的剧情、不要透露结局，被问到就说「等开讲你就知道了」。`
+  );
+}
+
+/** 开讲前 5 分钟在直播间喊一声（页面 + 语音 + 抖音公屏） */
+async function announceSoon(cfg, at) {
+  const book = upcomingBook(cfg);
+  const text = book
+    ? `还有五分钟，${fmtHm(at)} 准时开讲。今晚念《${book.title}》${book.chapters ? `，一共 ${book.chapters} 章` : ''}。先把灯点上，我喝口水就开。`
+    : `还有五分钟就开讲了，${fmtHm(at)} 准时开始。今晚这本还没落到书桌上，我先去翻一翻。`;
+  let voice = '';
+  try {
+    const out = await synthesize(text, voiceOptsOf(cfg, { maxChars: 400 }));
+    voice = out.url || '';
+  } catch (err) {
+    console.warn('[voice] 开讲提醒合成失败：', err.message);
+  }
+  pushEvent(addAiEvent({ text, source: 'schedule', voice }));
+  enqueueReply(text);
+  broadcastNovel('wave');
+  console.log('[schedule] 已发开讲提醒：', fmtHm(at));
+}
+
+/** 每分钟看一眼：到点提醒 / 到点开讲 */
+async function storyScheduleTick() {
+  const cfg = getConfig();
+  if (broadcastView().mode === 'fitness') return;
+  if (!cfg.novel?.enabled) return;
+  /* 没设时间就按默认 17:00（页面也显示这个） */
+  const at = nextStartMs(cfg);
+  if (!at) return;
+  const now = Date.now();
+  const nv = getNovel();
+  const phase = nv?.phase || 'idle';
+  const idle = phase === 'idle' || phase === 'done' || phase === 'afterword';
+  if (!idle) return;
+
+  /* 5 分钟提醒：同一场只喊一次 */
+  if (now >= at - REMIND_BEFORE_MS && now < at && nv?.remindedFor !== at) {
+    markReminded(at);
+    await announceSoon(cfg, at);
+    return;
+  }
+
+  /* 到点自动开讲：每次都从「目录里最新的一本」开始，不接着昨天那本 */
+  if (cfg.novel.autoStart !== false && now >= at && now < at + 3 * 60_000) {
+    const newest = listNovels(cfg)[0];
+    startNovel(cfg, newest ? { file: newest.name } : {});
+    pushEvent({
+      kind: 'system',
+      username: '系统',
+      text: `到点了（${fmtHm(at)}），开始念书。`,
+    });
+    broadcastNovel('type');
+    scheduleNovel(600);
+    console.log('[schedule] 到点开讲');
+  }
+}
+
+async function synthChapter(cfg, ch) {
+  const say = `${spokenTitle(ch.title)}。\n${speechOf(ch.text)}`;
+  const out = await synthesize(say, voiceOptsOf(cfg, { maxChars: 40000 }));
+  return out.url || '';
+}
+
+/** 看门狗用的时长估算：edge 御姐音大约每秒 4 个字 */
+function estChapterMs(text) {
+  return Math.round((String(text || '').length / 4) * 1000 * 1.25) + 20000;
+}
+
+/** 这一章还要多久（音频在播时按真实时长算，否则按字数估），再加 45 秒缓冲 */
+function watchdogDelay() {
+  const nv = getNovel() || {};
+  const total = Number(nv.audioMs || 0) || estChapterMs(currentChapter()?.text || '');
+  const played = nv.chapterStartedAt ? Date.now() - nv.chapterStartedAt : 0;
+  const left = Math.max(20000, total - played);
+  return left + 45000;
+}
+
+/** 一章读完，写「小结 + 本章线索卡」：人物动向 / 新线索 / 未解谜团 */
+async function summarizeChapter(cfg, ch) {
+  const nv = getNovel();
+  const plain = String(ch.text || '').replace(/\s+/g, ' ').trim();
+  const cast = castNames(novelInfo());
+  let card = null;
+
+  if (cfg.ai.enabled && cfg.ai.apiKey) {
+    try {
+      const res = await aiComplete(cfg, buildCardMessages({ title: ch.title, text: ch.text, cast: cast.join('、') }), {
+        temperature: 0.7,
+        maxTokens: 420,
+        timeoutMs: 60000,
+      });
+      const cost = costOf(res.usage, ratesFor(cfg.pricing, res.usedModel || cfg.ai.model));
+      addUsageOnly({ usage: res.usage, cost });
+      card = parseCard(res.text);
+      if (!card) {
+        /* 模型偶发不吐 JSON，再要一次「只给 JSON」 */
+        const retry = await aiComplete(
+          cfg,
+          [
+            ...buildCardMessages({ title: ch.title, text: ch.text, cast: cast.join('、') }),
+            { role: 'assistant', content: String(res.text || '').slice(0, 600) },
+            { role: 'user', content: '只输出那段 JSON 本身，不要解释、不要 markdown 代码块。' },
+          ],
+          { temperature: 0.3, maxTokens: 360, timeoutMs: 60000 },
+        );
+        const cost2 = costOf(retry.usage, ratesFor(cfg.pricing, retry.usedModel || cfg.ai.model));
+        addUsageOnly({ usage: retry.usage, cost: cost2 });
+        card = parseCard(retry.text);
+      }
+    } catch (err) {
+      console.warn('[novel] 线索卡生成失败（用规则兜底）：', err.message);
+    }
+  }
+  if (!card) card = fallbackCard({ text: ch.text, cast });
+
+  const text = (card.summary || plain.slice(0, 46)).slice(0, 120);
+  setSummary(nv.idx, text);
+  setCard(nv.idx, { ...card, summary: text });
+  return text;
+}
+
+/** 念完一整本之后的作品档案：设定 / 人物 / 优点 / 短板 / 可以问观众的问题 */
+async function makeArchive(cfg) {
+  const info = novelInfo();
+  let obj = null;
+  if (cfg.ai.enabled && cfg.ai.apiKey) {
+    for (let attempt = 1; attempt <= 2 && !obj; attempt++) {
+      try {
+        const msgs = buildArchiveMessages({ ...info, summaries: getNovel()?.summaries || [] });
+        if (attempt === 2) {
+          msgs.push({ role: 'user', content: '只输出那段 JSON 本身，不要解释、不要 markdown 代码块。' });
+        }
+        const res = await aiComplete(cfg, msgs, {
+          temperature: attempt === 1 ? 0.9 : 0.6,
+          maxTokens: 900,
+          timeoutMs: 90000,
+        });
+        const cost = costOf(res.usage, ratesFor(cfg.pricing, res.usedModel || cfg.ai.model));
+        addUsageOnly({ usage: res.usage, cost });
+        obj = parseArchive(res.text);
+        if (!obj) console.warn('[novel] 档案 JSON 没解析出来，重试一次');
+      } catch (err) {
+        console.warn('[novel] 档案生成失败：', err.message);
+      }
+    }
+  }
+  if (!obj) obj = fallbackArchive(info, chaptersOf());
+  setArchive(obj);
+  pushEvent({
+    kind: 'system',
+    username: '系统',
+    text: '整本念完了，作品档案已经整理好，可以和大家聊聊设定、人物和优缺点。',
+  });
+  return obj;
+}
+
+/** 一章结束（音频 ended 或看门狗触发） */
+async function chapterDone(source) {
+  const cfg = getConfig();
+  const v = storyView(cfg);
+  if (v.phase !== 'reading') return { ok: true, ignored: true, phase: v.phase };
+  const ch = currentChapter();
+  // 先切到休息态（此刻起弹幕回复就走语音），再慢慢写小结
+  endChapter(cfg);
+  const min = Math.round(Number(cfg.novel?.breakSec || 300) / 60);
+  pushEvent({
+    kind: 'system',
+    username: '系统',
+    text: `这一章念完了${source === 'audio' ? '' : '（自动）'}，休息 ${min} 分钟，聊聊刚才听到的。`,
+  });
+  broadcastNovel('wave');
+  scheduleNovel((Number(cfg.novel?.breakSec || 300) + 1) * 1000);
+  if (ch) {
+    summarizeChapter(cfg, ch)
+      .then(async () => {
+        broadcastNovel();
+        /* 线索卡也念一遍：听众不看屏幕也知道这章记住了什么 */
+        await speakCard(cfg);
+      })
+      .catch((err) => console.warn('[novel] 小结失败：', err.message));
+  }
+  return { ok: true, phase: 'break', breakSec: Number(cfg.novel?.breakSec || 300) };
+}
+
+/** 把本章线索卡用语音说一遍（休息期只出声，不进弹幕框） */
+async function speakCard(cfg) {
+  const nv = getNovel();
+  const card = (Array.isArray(nv?.cards) && nv.cards[nv.idx]) || null;
+  if (!card) return;
+  const parts = [`这一章先说个大概：${card.summary}。`];
+  if (card.people) parts.push(`人物动向，${card.people}。`);
+  if (card.clues) parts.push(`新线索，${card.clues}。`);
+  if (card.puzzles) parts.push(`还没解开的，${card.puzzles}。`);
+  const text = parts.join('');
+  let voice = '';
+  try {
+    const out = await synthesize(text, voiceOptsOf(cfg, { maxChars: 800 }));
+    voice = out.url || '';
+  } catch (err) {
+    console.warn('[voice] 线索卡朗读失败：', err.message);
+  }
+  pushEvent(addAiEvent({ text, source: 'card', voiceOnly: true, voice }));
+}
+
+async function novelStep() {
+  const cfg = getConfig();
+  if (!cfg.novel?.enabled) return { ok: false, error: '小说模式关着' };
+  if (novelBusy) return { ok: false, error: '上一章还在准备' };
+
+  let v = storyView(cfg);
+
+  // 还没开 / 已经读完：从头开始下一本
+  if (v.phase === 'idle' || v.phase === 'done') {
+    const r = startNovel(cfg, {});
+    if (!r.ok) {
+      pushEvent({ kind: 'system', username: '系统', text: r.error });
+      return r;
+    }
+    pushEvent({ kind: 'system', username: '系统', text: `今晚念《${r.title}》，一共 ${r.chapters} 章。` });
+    broadcastNovel('type');
+    v = storyView(cfg);
+  }
+
+  if (v.phase === 'break') {
+    const left = Number(v.countdown || 0);
+    if (left > 0) {
+      scheduleNovel(left * 1000 + 500);
+      return { ok: true, waiting: true, left };
+    }
+    const r = nextChapter();
+    broadcastNovel('type');
+    if (!r.more) {
+      await makeArchive(cfg);
+      broadcastNovel('wave');
+      return { ok: true, afterword: true };
+    }
+    scheduleNovel(600);
+    return { ok: true, next: r.idx };
+  }
+
+  if (v.phase === 'afterword') {
+    if (!getNovel()?.archive) await makeArchive(cfg);
+    broadcastNovel('wave');
+    return { ok: true, afterword: true };
+  }
+
+  const ch = currentChapter();
+  if (!ch) {
+    pushEvent({ kind: 'system', username: '系统', text: '这一本里没找到可念的章节。' });
+    return { ok: false, error: '没有章节' };
+  }
+
+  // preparing：把整章合成为一段音频
+  if (v.phase === 'preparing' || !v.audioUrl) {
+    novelBusy = true;
+    try {
+      pushEvent({ kind: 'system', username: '系统', text: `正在把「${ch.title}」合成语音（${ch.text.length} 字）…` });
+      const url = await synthChapter(cfg, ch);
+      if (!url) throw new Error('语音没合成出来');
+      setAudio(url, estChapterMs(ch.text));
+      beginReading();
+      ensureSystemVolume().catch(() => {});
+      novelRetry = 0;
+      broadcastNovel('type');
+      pushEvent({ kind: 'system', username: '系统', text: `开始念「${ch.title}」。` });
+      scheduleNovel(watchdogDelay());
+      return { ok: true, reading: true, chapter: ch.title };
+    } catch (err) {
+      console.warn('[novel] 合成失败：', err.message);
+      pushEvent({ kind: 'system', username: '系统', text: `这一章语音没合成出来：${err.message}`.slice(0, 120) });
+      // 合成失败也要重排，否则会永远停在「准备中」
+      novelRetry = (novelRetry || 0) + 1;
+      if (novelRetry <= 3) {
+        const wait = Math.min(60_000, 8000 * novelRetry);
+        pushEvent({ kind: 'system', username: '系统', text: `${Math.round(wait / 1000)} 秒后再试一次（第 ${novelRetry} 次）。` });
+        scheduleNovel(wait);
+      }
+      return { ok: false, error: err.message };
+    } finally {
+      novelBusy = false;
+    }
+  }
+
+  // reading：音频在播，等 ended 或看门狗（优先用页面回填的真实时长）
+  scheduleNovel(watchdogDelay());
+  return { ok: true, reading: true, waiting: true };
+}
+
+// ---------- 工具 ----------
+/* ---------- 氛围电台：常驻播放自己的免版权曲库 ---------- */
+const radio = new Radio(getConfig, {
+  hasAudience: () => hasAudience(300),
+  log: (m) => console.log(`  [radio] ${m}`),
+});
+let radioWasOn = true;   // 关窗口前的电台状态，开窗口要按这个恢复
+
+function radioView() {
+  return radio.status();
+}
+
+function json(res, code, data) {
+  const body = JSON.stringify(data);
+  res.writeHead(code, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'access-control-allow-origin': '*',
+  });
+  res.end(body);
+}
+
+async function readBody(req, limit = 512 * 1024) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) throw new Error('请求体过大');
+    chunks.push(chunk);
+  }
+  if (!chunks.length) return {};
+  const raw = Buffer.concat(chunks).toString('utf8');
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error('不是合法 JSON');
+  }
+}
+
+const AUDIO_MIME = {
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
+  '.webm': 'audio/webm',
+  '.mp4': 'video/mp4',
+};
+
+/** 带 Range 的文件流（<audio> 拖动进度条要它） */
+async function streamFile(req, res, file) {
+  const info = await stat(file);
+  const type = AUDIO_MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
+  const range = req.headers.range;
+  const base = {
+    'content-type': type,
+    'accept-ranges': 'bytes',
+    'cache-control': 'public, max-age=3600',
+    'access-control-allow-origin': '*',
+  };
+  if (range) {
+    const m = /bytes=(\d*)-(\d*)/.exec(range);
+    let start = m?.[1] ? Number(m[1]) : 0;
+    let end = m?.[2] ? Number(m[2]) : info.size - 1;
+    if (!Number.isFinite(start) || start < 0) start = 0;
+    if (!Number.isFinite(end) || end >= info.size) end = info.size - 1;
+    if (start > end) {
+      res.writeHead(416, { ...base, 'content-range': `bytes */${info.size}` });
+      return res.end();
+    }
+    res.writeHead(206, { ...base, 'content-range': `bytes ${start}-${end}/${info.size}`, 'content-length': end - start + 1 });
+    createReadStream(file, { start, end }).pipe(res);
+    return;
+  }
+  res.writeHead(200, { ...base, 'content-length': info.size });
+  createReadStream(file).pipe(res);
+}
+
+async function serveStatic(req, res, urlPath) {
+  let rel = decodeURIComponent(urlPath.split('?')[0]);
+  // 动作示范视频：openGym 的 catalogue/media/clip/<id>.mp4，放在 data/gym/media 下（不进仓库）
+  if (rel.startsWith('/gym-media/clip/')) {
+    const name = path.basename(rel);
+    if (!/^\d{4,6}\.mp4$/.test(name)) {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('404');
+      return;
+    }
+    try {
+      await streamFile(req, res, path.join(ROOT, 'data', 'gym', 'media', 'clip', name));
+    } catch {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('404');
+    }
+    return;
+  }
+  if (rel === '/' || rel === '') rel = '/index.html';
+  // 后台是一个页面按路径分页：/admin 基础设置、/admin/story、/admin/fitness、/admin/board
+  if (rel === '/admin' || rel === '/admin/' || rel.startsWith('/admin/')) rel = '/admin.html';
+  // 健身直播间
+  if (rel === '/fitness' || rel === '/fitness/') rel = '/fitness.html';
+  if (rel === '/gym' || rel === '/gym/') rel = '/fitness.html';
+  const file = path.join(PUBLIC_DIR, rel);
+  if (!file.startsWith(PUBLIC_DIR)) {
+    res.writeHead(403).end('forbidden');
+    return;
+  }
+  try {
+    const info = await stat(file);
+    if (!info.isFile()) throw new Error('not file');
+    const ext = path.extname(file).toLowerCase();
+    // 视频和音频都走带 Range 的流：WKWebView 的 AVFoundation 不认 octet-stream，也不认没有 Range 的整块响应
+    if (ext === '.mp4' || ext === '.m4v' || ext === '.mov' || AUDIO_MIME[ext]) {
+      await streamFile(req, res, file);
+      return;
+    }
+    res.writeHead(200, {
+      'content-type': MIME[ext] || 'application/octet-stream',
+      // 后台脚本包含配置保存逻辑，不能沿用长缓存，否则重启后可能继续运行旧代码。
+      'cache-control': ext === '.html' || ext === '.js' ? 'no-store' : 'public, max-age=3600',
+      'access-control-allow-origin': '*',
+    });
+    res.end(await readFile(file));
+  } catch {
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('404');
+  }
+}
+
+// ---------- 启动 ----------
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`);
+  const p = url.pathname;
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'access-control-allow-origin': '*',
+      'access-control-allow-methods': 'GET,POST,OPTIONS',
+      'access-control-allow-headers': 'content-type',
+      'access-control-max-age': '86400',
+    });
+    return res.end();
+  }
+
+  try {
+    if (!p.startsWith('/api/')) return await serveStatic(req, res, p);
+
+    // ---- 氛围电台 ----
+    if (p === '/api/radio') {
+      if (req.method === 'POST') {
+        let body = {};
+        try {
+          body = await readBody(req);
+        } catch {
+          body = {};
+        }
+        const action = String(body?.action || '').trim();
+        if (action === 'next') radio.next();
+        else if (action === 'pause') radio.pause();
+        else if (action === 'resume') radio.resume();
+        else if (action === 'start') {
+          updateConfig({ radio: { enabled: true } });
+          saveConfig();
+          radio.start();
+        }
+        else if (action === 'reload') radio.load();
+        return json(res, 200, { ok: true, radio: radioView() });
+      }
+      return json(res, 200, { ok: true, radio: radioView() });
+    }
+
+    // ================= 控制板：直播时手动控场 =================
+    if (p === '/api/control/state' && req.method === 'GET') {
+      const c = getConfig();
+      return json(res, 200, {
+        ok: true,
+        monoPaused,
+        auto: { speak: c.auto?.speak !== false },
+        read: readView(),
+        radio: radioView(),
+        lines: lineCount(),
+        voiceEngine: c.voice?.engine || 'sedge',
+        idle: {
+          mode: c.idle?.mode || 'normal',
+          enabled: c.idle?.enabled !== false,
+          waitSec: Number(c.idle?.waitSec ?? 40),
+          minGapSec: Number(c.idle?.minGapSec ?? 45),
+          perHour: Number(c.idle?.perHour ?? 45),
+        },
+        volumes: {
+          voice: c.control?.voiceVol ?? 0.9,
+          sfx: c.control?.sfxVol ?? 0.5,
+          amb: c.control?.ambVol ?? 0.22,
+          music: c.radio?.volume ?? 0.13,
+        },
+        hud: { showTokens: c.ui?.showTokens !== false },
+        layout: c.ui?.layout || {},
+        layoutEdit: c.ui?.layoutEdit === true,
+        stats: statsView(),
+      });
+    }
+
+    // 直播画面上的小挂件开关（默认显示 token 用量）
+    if (p === '/api/control/hud' && req.method === 'POST') {
+      const body = await readBody(req);
+      const showTokens = body.showTokens !== false;
+      updateConfig({ ui: { showTokens } });
+      await saveConfig();
+      broadcast({ type: 'hud', showTokens });
+      return json(res, 200, { ok: true, hud: { showTokens } });
+    }
+
+    if (p === '/api/control/persona' && req.method === 'GET') {
+      const file = path.join(ROOT, 'data/persona.md');
+      const text = existsSync(file) ? readFileSync(file, 'utf8') : '';
+      return json(res, 200, { ok: true, text, chars: text.trim().length, file: 'data/persona.md' });
+    }
+
+    if (p === '/api/control/persona' && req.method === 'POST') {
+      const body = await readBody(req);
+      const text = String(body.text || '').replace(/\r/g, '').trim();
+      if (text.length < 200) return json(res, 400, { ok: false, error: '人设太短（少于 200 字），先别保存' });
+      writeFileSync(path.join(ROOT, 'data/persona.md'), text + '\n', 'utf8');
+      const chars = reloadPersona();
+      console.log(`[persona] 已更新，生效 ${chars} 字`);
+      return json(res, 200, { ok: true, chars, file: 'data/persona.md' });
+    }
+
+    // 开场白：三句话，钩子 + 留人 + 引导发言。观众随时进来，随时重说
+    if (p === '/api/control/intro' && req.method === 'POST') {
+      const lines = [
+        '我是绫波丽。今天在画室，一边画，一边读点自己写的东西。',
+        '你要是刚进来，坐一会儿。我不太会说话，但会一直在这儿画。',
+        '想让我知道你在，留句话就行，我会念到你的名字。',
+      ];
+      for (const t of lines) {
+        const url = await speakReply(t);
+        if (url) pushEvent(addAiEvent({ text: t, source: 'intro', voice: url }));
+      }
+      return json(res, 200, { ok: true, said: lines.length });
+    }
+
+    if (p === '/api/control/auto' && req.method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      const on = !(body.speak === false || body.on === false);
+      updateConfig({ auto: { speak: on } });
+      saveConfig();
+      console.log(`[auto] 自动说话 ${on ? '开' : '关'}`);
+      return json(res, 200, { ok: true, speak: on });
+    }
+
+    if (p === '/api/control/idle' && req.method === 'POST') {
+      const body = await readBody(req);
+      const mode = String(body.mode || '');
+      const preset = IDLE_MODES[mode];
+      if (!preset) return json(res, 400, { ok: false, error: '没有这个档位' });
+      updateConfig({ idle: { ...preset, mode } });
+      saveConfig();
+      broadcast({ type: 'control', action: 'idle', mode });
+      return json(res, 200, { ok: true, mode, preset });
+    }
+
+    if (p === '/api/control/volume' && req.method === 'POST') {
+      const body = await readBody(req);
+      const kind = String(body.kind || '');
+      const value = Math.min(1, Math.max(0, Number(body.value)));
+      if (!Number.isFinite(value)) return json(res, 400, { ok: false, error: '音量不对' });
+      if (kind === 'music') {
+        updateConfig({ radio: { volume: value } });
+        await saveConfig();
+        // 音量是 afplay 起进程时传进去的，改完得重起当前这首才生效
+        try {
+          radio.pause();
+          radio.resume();
+        } catch { /* 没在播就算了 */ }
+        return json(res, 200, { ok: true, kind, value });
+      }
+      const map = { voice: 'voiceVol', sfx: 'sfxVol', amb: 'ambVol' };
+      const key = map[kind];
+      if (!key) return json(res, 400, { ok: false, error: '不认识的音量' });
+      updateConfig({ control: { [key]: value } });
+      await saveConfig();
+      broadcast({ type: 'control', action: 'volume', kind, value });
+      return json(res, 200, { ok: true, kind, value });
+    }
+
+    if (p === '/api/control/layout' && req.method === 'POST') {
+      const body = await readBody(req);
+      if (body.reset) {
+        // 全部复位：清掉所有自定义位置，页面回到 CSS 里的默认排布
+        updateConfig({ ui: { layout: {} } });
+        const lay = getConfig().ui && getConfig().ui.layout;
+        if (lay) for (const k of Object.keys(lay)) delete lay[k];
+        await saveConfig();
+        broadcast({ type: 'control', action: 'layoutReset' });
+        return json(res, 200, { ok: true, reset: true });
+      }
+      if (body.edit != null) {
+        const on = !!body.edit;
+        updateConfig({ ui: { layoutEdit: on } });
+        await saveConfig();
+        broadcast({ type: 'control', action: 'layoutEdit', on });
+        return json(res, 200, { ok: true, edit: on });
+      }
+      const name = String(body.name || '');
+      if (!['say', 'sketch', 'deck'].includes(name)) {
+        return json(res, 400, { ok: false, error: '不认识的位置名' });
+      }
+      if (body.clear) {
+        const lay = getConfig().ui && getConfig().ui.layout;
+        if (lay && lay[name]) delete lay[name];
+        await saveConfig();
+        broadcast({ type: 'control', action: 'layoutClear', name });
+        return json(res, 200, { ok: true, cleared: name });
+      }
+      const x = Math.max(0, Math.min(100, Number(body.x)));
+      const y = Math.max(0, Math.min(100, Number(body.y)));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        return json(res, 400, { ok: false, error: 'x/y 不对' });
+      }
+      updateConfig({ ui: { layout: { [name]: { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 } } } });
+      await saveConfig();
+      broadcast({ type: 'control', action: 'layout', name, x, y });
+      return json(res, 200, { ok: true, name, x, y });
+    }
+
+    if (p === '/api/control/read/start' && req.method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      const text = String(body.text || '').trim();
+      if (!text) return json(res, 400, { ok: false, error: '没有内容' });
+      if (text.length > 120000) return json(res, 400, { ok: false, error: '太长，一段别超过 12 万字' });
+      const r = await startRead(text, String(body.title || '').slice(0, 60));
+      return json(res, r.ok ? 200 : 400, { ...r, read: readView() });
+    }
+
+    if (p === '/api/control/read/premake' && req.method === 'POST') {
+      const body = await readBody(req);
+      try {
+        const prem = await premakeRead(body.text, body.title);
+        return json(res, 200, { ok: true, prem });
+      } catch (err) {
+        return json(res, 400, { ok: false, error: err.message });
+      }
+    }
+    if (p === '/api/control/read/prem/status' && req.method === 'GET') {
+      return json(res, 200, { ok: true, prem: readPrem });
+    }
+    if (p === '/api/control/read/next' && req.method === 'POST') {
+      lastReadPollAt = Date.now();
+      clearTimeout(readFallback);
+      readFallback = null;
+      const r = await nextRead();
+      return json(res, 200, { ...r, read: readView() });
+    }
+
+    if (p === '/api/control/read/stop' && req.method === 'POST') {
+      const had = stopRead();
+      return json(res, 200, { ok: true, stopped: had, read: readView() });
+    }
+
+    if (p === '/api/control/read/status' && req.method === 'GET') {
+      lastReadPollAt = Date.now();
+      return json(res, 200, { ok: true, read: readView() });
+    }
+
+    if (p === '/api/control/wrapup' && req.method === 'POST') {
+      const line = nextLine({ cat: 'bye' }) || '今天到这儿。纸晾一下。';
+      let url = '';
+      try { url = await speakReply(line); } catch { /* 合成失败也照样收工 */ }
+      const ev = addAiUsage({ usage: null, cost: 0, replyText: line });
+      ev.voiceOnly = true;
+      ev.voice = url;
+      ev.source = 'control';
+      pushEvent(ev);
+      if (url) broadcast({ type: 'control', action: 'say', url, text: line });
+      const closeInMs = Math.min(12000, 3000 + line.length * 300);
+      setTimeout(() => { closeLiveWindow().catch(() => {}); }, closeInMs);
+      console.log(`[wrapup] ${line}（${closeInMs}ms 后关窗）`);
+      return json(res, 200, { ok: true, text: line, closeInMs });
+    }
+
+    if (p === '/api/control/window' && req.method === 'POST') {
+      const body = await readBody(req);
+      const action = String(body.action || 'off');
+      const uid = process.getuid();
+      const plist = path.join(process.env.HOME || '', 'Library/LaunchAgents/com.xiaoman.window.plist');
+      const label = `gui/${uid}/com.xiaoman.window`;
+      if (action === 'off') {
+        await closeLiveWindow();
+      } else if (action === 'on') {
+        // 收工时 closeLiveWindow() 会把任务 bootout 并 disable，所以开窗前必须先把 enable 回来，
+        // 只 bootstrap 会报「Bootstrap failed: 5: Input/output error」，窗口根本起不来。
+        execFile('launchctl', ['enable', label], () => {
+          execFile('launchctl', ['bootstrap', `gui/${uid}`, plist], () => {
+            execFile('launchctl', ['kickstart', '-k', label], (err2) => {
+              console.log('[control] 开窗口', err2 ? String(err2.message).slice(0, 60) : 'ok');
+            });
+          });
+        });
+        // 关窗时把 radio.enabled 写成了 false，开窗必须还回来，否则音乐永远不再响
+        if (radioWasOn !== false) {
+          updateConfig({ radio: { enabled: true } });
+          saveConfig();
+          try { radio.start(); } catch { /* 曲库空就算了 */ }
+          console.log('[control] 电台恢复');
+        }
+      } else {
+        return json(res, 400, { ok: false, error: '只支持 on / off' });
+      }
+      return json(res, 200, { ok: true, action });
+    }
+
+    if (p === '/api/sfxlog' && req.method === 'POST') {
+      const body = await readBody(req);
+      console.log(`[sfx] ${body.ok ? '响了' : '没播出来'} ${body.file || ''} ${body.err || ''}`);
+      return json(res, 200, { ok: true });
+    }
+
+    if (p === '/api/control/pose' && req.method === 'POST') {
+      const body = await readBody(req);
+      const name = String(body.name || '').trim();
+      const ms = Math.max(0, Number(body.ms) || 0);
+      if (!name) return json(res, 400, { ok: false, error: '没有动作名' });
+      broadcast({ type: 'control', action: 'pose', name, ms });
+      return json(res, 200, { ok: true, pose: name, ms });
+    }
+
+    if (p === '/api/control/say' && req.method === 'POST') {
+      const body = await readBody(req);
+      const text = String(body.text || '').trim().slice(0, 200);
+      if (!text) return json(res, 400, { ok: false, error: '内容为空' });
+      let voice = null;
+      try {
+        voice = await synthesize(text, { engine: 'sovits' });
+      } catch (e) {
+        console.warn('[control] 合成失败:', String(e?.message || e).slice(0, 100));
+      }
+      if (!voice) return json(res, 500, { ok: false, error: '合成失败' });
+      const ev = addAiUsage({ usage: null, cost: 0, replyText: text });
+      ev.voiceOnly = true;
+      ev.voice = voice;
+      ev.source = 'control';
+      pushEvent(ev);
+      broadcast({ type: 'control', action: 'say', url: voice.url, text, precomp: !!voice.precomp, ms: voice.ms });
+      return json(res, 200, { ok: true, voice });
+    }
+
+    if (p === '/api/control/random' && req.method === 'POST') {
+      const s = getState();
+      const recent = (s.events || []).filter((e) => e.kind === 'ai').slice(-120).map((e) => e.text);
+      const line = nextLine({ recent });
+      if (!line) return json(res, 400, { ok: false, error: '台词库是空的' });
+      let voice = null;
+      try {
+        voice = await synthesize(line, { engine: 'sovits' });
+      } catch (e) {
+        console.warn('[control] 随机台词合成失败:', String(e?.message || e).slice(0, 100));
+      }
+      if (!voice) return json(res, 500, { ok: false, error: '合成失败' });
+      const ev = addAiUsage({ usage: null, cost: 0, replyText: line });
+      ev.voiceOnly = true;
+      ev.voice = voice;
+      ev.source = 'control';
+      pushEvent(ev);
+      broadcast({ type: 'control', action: 'say', url: voice.url, text: line, precomp: !!voice.precomp, ms: voice.ms });
+      return json(res, 200, { ok: true, text: line, voice });
+    }
+
+    if (p === '/api/control/stop' && req.method === 'POST') {
+      broadcast({ type: 'control', action: 'stop' });
+      return json(res, 200, { ok: true });
+    }
+
+    if (p === '/api/control/mute' && req.method === 'POST') {
+      const body = await readBody(req);
+      monoPaused = !!body.paused;
+      broadcast({ type: 'control', action: 'mute', paused: monoPaused });
+      return json(res, 200, { ok: true, paused: monoPaused });
+    }
+
+    if (p === '/api/control/ambience' && req.method === 'POST') {
+      const body = await readBody(req);
+      const name = String(body.name || '');
+      const on = !!body.on;
+      const ALLOW = ['rain', 'thunder', 'wind', 'frog', 'bird', 'fire'];
+      if (on && !ALLOW.includes(name)) return json(res, 400, { ok: false, error: '没有这个环境音' });
+      broadcast({ type: 'control', action: 'ambience', name, on });
+      return json(res, 200, { ok: true, name, on });
+    }
+
+    if (p === '/api/control/lineAdd' && req.method === 'POST') {
+      const body = await readBody(req);
+      const text = String(body.text || '').trim().slice(0, 120);
+      const cat = String(body.cat || 'short').trim() || 'short';
+      if (!text) return json(res, 400, { ok: false, error: '内容为空' });
+      const file = path.join(ROOT, 'data', 'lines.json');
+      const db = JSON.parse(readFileSync(file, 'utf8'));
+      if (db.lines.some((l) => l.text === text)) {
+        return json(res, 200, { ok: true, dup: true, total: db.lines.length });
+      }
+      db.lines.push({ cat, text });
+      writeFileSync(file, JSON.stringify(db, null, 2) + '\n', 'utf8');
+      reloadLines();   // 走的是直接写文件这条路，把内存缓存丢掉，不然面板看不到新句
+      const key = createHash('sha1').update(text, 'utf8').digest('hex').slice(0, 12);
+      const tmp = path.join(ROOT, 'data', 'voice', `${key}.txt`);
+      const out = path.join(ROOT, 'voice_cache', `${key}.wav`);
+      try {
+        writeFileSync(tmp, text, 'utf8');
+        const kid = spawn(path.join(ROOT, '.venv-sovits', 'bin', 'python'),
+          [path.join(ROOT, 'tools', 'sovits_gen_single.py'), tmp, out],
+          { cwd: ROOT, env: { ...process.env, PYTHONPATH: '.:GPT_SoVITS' }, stdio: 'ignore' });
+        kid.on('exit', (code) => {
+          try { unlinkSync(tmp); } catch { /* 忽略 */ }
+          if (code !== 0 || !existsSync(out)) {
+            console.warn('[control] 新台词合成失败:', text.slice(0, 20));
+            return;
+          }
+          try {
+            const idxPath = path.join(ROOT, 'voice_cache', 'index.json');
+            const idx = JSON.parse(readFileSync(idxPath, 'utf8'));
+            idx[key] = { text, cat, file: `${key}.wav`, dur: 0 };
+            writeFileSync(idxPath, JSON.stringify(idx, null, 1), 'utf8');
+          } catch { /* 索引写不进不影响文件 */ }
+          broadcast({ type: 'control', action: 'lineReady', key, text, cat });
+          console.log('[control] 新台词就绪:', text.slice(0, 24));
+        });
+      } catch (e) {
+        return json(res, 500, { ok: false, error: `起不来合成：${String(e?.message || e).slice(0, 80)}` });
+      }
+      return json(res, 200, { ok: true, key, total: db.lines.length, pending: true });
+    }
+
+    if (p === '/api/control/lines' && req.method === 'GET') {
+      const list = allLines();
+      const cats = {};
+      for (const l of list) cats[l.cat] = (cats[l.cat] || 0) + 1;
+      return json(res, 200, { ok: true, total: list.length, on: list.filter((l) => !l.off).length, cats, lines: list });
+    }
+
+    if (p === '/api/control/lineSet' && req.method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      const id = String(body.id || '');
+      const off = body.off !== false;
+      if (!id || !setLineOff(id, off)) return json(res, 404, { ok: false, error: '没有这句' });
+      console.log(`[lines] ${off ? '关掉' : '打开'}一句 ${id}`);
+      return json(res, 200, { ok: true, id, off, on: lineCount(), total: allLines().length });
+    }
+
+    if (p === '/api/control/lineDel' && req.method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      const id = String(body.id || '');
+      if (!id || !deleteLine(id)) return json(res, 404, { ok: false, error: '没有这句' });
+      console.log(`[lines] 删除一句 ${id}`);
+      return json(res, 200, { ok: true, id, on: lineCount(), total: allLines().length });
+    }
+
+    if (p === '/api/control/lineEdit' && req.method === 'POST') {
+      const body = await readBody(req);
+      const id = String(body.id || '').trim();
+      const text = String(body.text || '').trim().slice(0, 300);
+      if (!id || !text) return json(res, 400, { ok: false, error: 'id 或内容为空' });
+      const r = editLine(id, text);
+      if (!r) return json(res, 404, { ok: false, error: '找不到这句' });
+      if (r.dup) return json(res, 409, { ok: false, error: '已经有一样的句子了' });
+      reloadLines();
+      console.log(`[lines] 改了一句 -> ${text.slice(0, 24)}`);
+      return json(res, 200, { ok: true, line: r, total: allLines().length });
+    }
+
+    if (p === '/api/control/lineSay' && req.method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      const id = String(body.id || '');
+      const line = allLines().find((l) => l.id === id);
+      if (!line) return json(res, 404, { ok: false, error: '没有这句' });
+      const say = line.text.replace(/\{name\}/g, '你');
+      const url = await speakReply(say);
+      pushEvent(addAiEvent({ text: say, source: 'manual', voiceOnly: true, voice: url }));
+      return json(res, 200, { ok: true, id, text: say, voice: url });
+    }
+
+    if (p === '/api/control/music' && req.method === 'GET') {
+      const dir = path.join(ROOT, 'assets_music');
+      let cat = { tracks: [] };
+      try {
+        cat = JSON.parse(readFileSync(path.join(dir, 'catalog.json'), 'utf8'));
+      } catch { /* 没目录就当空库 */ }
+      return json(res, 200, {
+        ok: true,
+        tracks: (cat.tracks || []).map((t) => ({ file: t.file, name: t.name, artist: t.artist, mood: t.mood, sec: t.sec })),
+        count: (cat.tracks || []).length,
+        now: radioView().current?.name || '',
+      });
+    }
+
+    if (p === '/api/control/music/upload' && req.method === 'POST') {
+      const body = await readBody(req, 48 * 1024 * 1024);
+      let name = String(body.name || '').replace(/[\\/:*?"<>|\s]/g, '_');
+      const dataUrl = String(body.data || '');
+      if (!name || !dataUrl) return json(res, 400, { ok: false, error: '缺文件名或内容' });
+      if (!/\.(mp3|m4a|wav|aac|flac|ogg)$/i.test(name)) name += '.mp3';
+      const b64 = dataUrl.includes(',') ? dataUrl.split(',').pop() : dataUrl;
+      const buf = Buffer.from(b64, 'base64');
+      if (!buf.length) return json(res, 400, { ok: false, error: '空文件' });
+      const dir = path.join(ROOT, 'assets_music');
+      writeFileSync(path.join(dir, name), buf);
+      const catPath = path.join(dir, 'catalog.json');
+      let cat = { source: '自选曲库', tracks: [] };
+      try { cat = JSON.parse(readFileSync(catPath, 'utf8')); } catch { /* 新建 */ }
+      cat.tracks = cat.tracks || [];
+      if (!cat.tracks.some((t) => t.file === name)) {
+        cat.tracks.push({
+          file: name,
+          name: name.replace(/\.[^.]+$/, ''),
+          artist: '自选',
+          mood: 'room',
+          sec: 0,
+          bytes: buf.length,
+        });
+      }
+      writeFileSync(catPath, JSON.stringify(cat, null, 1), 'utf8');
+      try { radio.load(); } catch { /* 刷新失败下次也会读 */ }
+      return json(res, 200, { ok: true, count: cat.tracks.length });
+    }
+
+    if (p === '/api/control/music/delete' && req.method === 'POST') {
+      const body = await readBody(req);
+      const file = String(body.file || '');
+      if (!file) return json(res, 400, { ok: false, error: '缺文件名' });
+      const dir = path.join(ROOT, 'assets_music');
+      const target = path.join(dir, path.basename(file));
+      if (existsSync(target)) unlinkSync(target);
+      const catPath = path.join(dir, 'catalog.json');
+      let cat = { tracks: [] };
+      try { cat = JSON.parse(readFileSync(catPath, 'utf8')); } catch { /* 没就没 */ }
+      cat.tracks = (cat.tracks || []).filter((t) => t.file !== file);
+      writeFileSync(catPath, JSON.stringify(cat, null, 1), 'utf8');
+      const cur = radioView().current;
+      try {
+        radio.load();
+        if (cur && cur.name && String(cur.name) === file.replace(/\.[^.]+$/, '')) radio.next();
+      } catch { /* 忽略 */ }
+      return json(res, 200, { ok: true, count: cat.tracks.length });
+    }
+
+    // ---- SSE ----
+    if (p === '/api/events' && req.method === 'GET') {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-store',
+        connection: 'keep-alive',
+        'access-control-allow-origin': '*',
+        'x-accel-buffering': 'no',
+      });
+      res.write(': connected\n\n');
+      clients.add(res);
+      sseSend(res, {
+        type: 'init',
+        config: publicConfig(),
+        broadcast: broadcastView(),
+        stats: statsView(),
+        balance,
+        song: songView(),
+        gifts: getConfig().gifts,
+        events: getState().events.slice(-50).map(eventView),
+        story: storyView(getConfig()),
+        danmaku: danmakuView(),
+        aiError: aiLastError,
+        serverTime: Date.now(),
+      });
+      const hb = setInterval(() => {
+        try {
+          res.write(': hb\n\n');
+        } catch {
+          clearInterval(hb);
+        }
+      }, 20000);
+      req.on('close', () => {
+        clearInterval(hb);
+        clients.delete(res);
+      });
+      return;
+    }
+
+    // ---- 健身房直播间（自己一套 SSE，和故事间互不打扰）----
+    if (p === '/api/fitness/events' && req.method === 'GET') {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-store',
+        connection: 'keep-alive',
+        'access-control-allow-origin': '*',
+        'x-accel-buffering': 'no',
+      });
+      res.write(': connected\n\n');
+      const detach = fitAttach(res);
+      sseSend(res, { type: 'fit-extra', stats: statsView(), song: songView(), balance, config: publicConfig(), gifts: getConfig().gifts });
+      const hb = setInterval(() => {
+        try {
+          res.write(': hb\n\n');
+          fitTouch(res);
+        } catch {
+          clearInterval(hb);
+        }
+      }, 20000);
+      req.on('close', () => {
+        clearInterval(hb);
+        detach();
+      });
+      return;
+    }
+
+    if (p === '/api/fitness/state' && req.method === 'GET') {
+      return json(res, 200, { ok: true, ...fitView(), stats: statsView(), song: songView(), parts: gymParts() });
+    }
+
+    if (p === '/api/fitness/search' && req.method === 'GET') {
+      const q = url.searchParams.get('q') || '';
+      const part = url.searchParams.get('part') || '';
+      const list = searchExercises(q, { part, limit: 24 }).map((e) => exerciseView(e, { includeSteps: false }));
+      return json(res, 200, { ok: true, list });
+    }
+
+    if (p === '/api/fitness/show' && req.method === 'POST') {
+      const body = await readBody(req);
+      const view = fitShowExercise(String(body.id || body.text || ''), { by: body.by || '后台' });
+      if (!view) return json(res, 404, { ok: false, error: '动作库里没有这个动作' });
+      if (body.speak !== false) await fitSay(exerciseSpeech(view), { username: '绫波丽', speak: body.voice !== false });
+      return json(res, 200, { ok: true, current: view });
+    }
+
+    if (p === '/api/fitness/plan' && req.method === 'POST') {
+      const body = await readBody(req);
+      const plan = fitSetPlan({
+        part: String(body.part || '全身'),
+        level: Number(body.level) || 0,
+        equip: String(body.equip || ''),
+        minutes: Number(body.minutes) || 45,
+        by: body.by || '后台',
+      });
+      if (body.speak !== false) await fitSay(planSpeech(plan, { username: body.username || '' }), { username: '绫波丽', speak: body.voice !== false });
+      return json(res, 200, { ok: true, plan });
+    }
+
+    if (p === '/api/fitness/say' && req.method === 'POST') {
+      const body = await readBody(req);
+      const item = await fitSay(String(body.text || '').slice(0, 600), {
+        username: body.username || '绫波丽',
+        speak: body.voice !== false,
+      });
+      if (!item) return json(res, 400, { ok: false, error: '没有可说的内容' });
+      return json(res, 200, { ok: true, item });
+    }
+
+    if (p === '/api/fitness/demo' && req.method === 'POST') {
+      // 后台「造一条弹幕」：走和抖音弹幕一样的入口，方便排练
+      const body = await readBody(req);
+      const ev = {
+        kind: String(body.kind || 'chat'),
+        username: String(body.username || '路过的朋友'),
+        text: String(body.text || ''),
+        giftName: body.giftName,
+        count: body.count,
+      };
+      fitIngest({ ...ev, source: 'demo' }).catch((e) => console.warn('[fitness] demo 失败', e.message));
+      return json(res, 200, { ok: true });
+    }
+
+    if (p === '/api/fitness/complete' && req.method === 'POST') {
+      const r = fitCompleteSet();
+      if (!r) return json(res, 409, { ok: false, error: '还没有正在做的动作' });
+      return json(res, 200, { ok: true, ...r, state: fitView() });
+    }
+
+    if (p === '/api/fitness/next' && req.method === 'POST') {
+      const next = fitNextBlock();
+      if (!next) return json(res, 409, { ok: false, error: '还没有训练计划' });
+      if (next) await fitSay(`下一个，${next.name}，${next.sets} 组 ${next.reps}。`, { username: '绫波丽' });
+      return json(res, 200, { ok: true, current: next });
+    }
+
+    if (p === '/api/fitness/rest' && req.method === 'POST') {
+      const body = await readBody(req);
+      const rest = fitStartRest(Number(body.sec) || fit.current?.restSec || 60, { nextName: body.next || '' });
+      return json(res, 200, { ok: true, rest });
+    }
+
+    if (p === '/api/fitness/reset' && req.method === 'POST') {
+      fitReset();
+      return json(res, 200, { ok: true, state: fitView() });
+    }
+
+
+    // ---- 打开直播窗时清场：音乐队列、消息队列、弹幕（最多留 50 条）----
+    if (p === '/api/session/boot' && req.method === 'POST') {
+      const s = getState();
+      const clearedPlaylist = s.playlist.length + (s.currentSong ? 1 : 0);
+      const clearedEvents = s.events.length;
+      s.playlist = [];
+      s.currentSong = null;
+      s.events = [];
+      const clearedOutbox = outbox.length;
+      outbox.length = 0;
+      outboxSeq = 1;
+      const clearedReplies = replyQueue.length;
+      replyQueue.length = 0;
+      scheduleSave();
+      broadcast({ type: 'boot', song: songView(), stats: statsView(), events: [] });
+      console.log(
+        `[boot] 直播窗打开，清场：音乐 ${clearedPlaylist} 首、消息 ${clearedEvents} 条、发送箱 ${clearedOutbox} 条、待回复 ${clearedReplies} 条`,
+      );
+      return json(res, 200, {
+        ok: true,
+        cleared: { song: clearedPlaylist, events: clearedEvents, outbox: clearedOutbox, replies: clearedReplies },
+      });
+    }
+
+    if (p === '/api/state' && req.method === 'GET') {
+      return json(res, 200, {
+        ok: true,
+        config: publicConfig(),
+        broadcast: broadcastView(),
+        stats: statsView(),
+        balance,
+        song: songView(),
+        gifts: getConfig().gifts,
+        events: getState().events.slice(-50).map(eventView),
+        story: storyView(getConfig()),
+        danmaku: danmakuView(),
+        aiError: aiLastError,
+        serverTime: Date.now(),
+      });
+    }
+
+    // ---- 弹幕直连 ----
+    if (p === '/api/danmaku' && req.method === 'GET') {
+      return json(res, 200, { ok: true, danmaku: danmakuView() });
+    }
+    if (p === '/api/danmaku/connect' && req.method === 'POST') {
+      const body = await readBody(req);
+      try {
+        const danmaku = await startDanmaku(body.roomId || body.rid || '');
+        return json(res, 200, { ok: true, danmaku });
+      } catch (err) {
+        return json(res, 400, { ok: false, error: err.message, danmaku: danmakuView() });
+      }
+    }
+    if (p === '/api/danmaku/disconnect' && req.method === 'POST') {
+      return json(res, 200, { ok: true, danmaku: stopDanmaku() });
+    }
+
+    // ---- 事件上报（扩展 / 测试） ----
+    if (p === '/api/event' && req.method === 'POST') {
+      const body = await readBody(req);
+      const out = handleIncoming(body);
+      return json(res, out.ok ? 200 : 400, out);
+    }
+
+    // ---- 发送箱 ----
+    if (p === '/api/outbox' && req.method === 'GET') {
+      const now = Date.now();
+      for (const it of outbox) {
+        if (it.status === 'pending' && now - it.createdAt > 90_000) it.status = 'expired';
+      }
+      return json(res, 200, {
+        ok: true,
+        items: outbox.filter((it) => it.status === 'pending'),
+        all: outbox.slice(-10).reverse(),
+      });
+    }
+
+    if (p === '/api/outbox/ack' && req.method === 'POST') {
+      const body = await readBody(req);
+      const ids = new Set((body.ids || [body.id]).map(Number).filter(Boolean));
+      for (const it of outbox) {
+        if (ids.has(it.id)) {
+          it.status = body.ok === false ? 'failed' : 'sent';
+          it.error = body.error || null;
+        }
+      }
+      return json(res, 200, { ok: true });
+    }
+
+    // ---- 手动说话（操作台） ----
+    if (p === '/api/say' && req.method === 'POST') {
+      const body = await readBody(req);
+      const text = String(body.text || '').trim();
+      if (!text) return json(res, 400, { ok: false, error: '内容为空' });
+      const ev = addEventOnly({ id: Date.now(), ts: Date.now(), kind: 'host', username: body.username || '主播', text, source: 'operator' });
+      pushEvent(ev);
+      const out = enqueueReply(text);
+      return json(res, 200, { ok: true, item: eventView(ev), outboxId: out.id });
+    }
+
+    // ---- 直接让绫波丽回一句（测试 / 手动触发） ----
+    if (p === '/api/ai/reply' && req.method === 'POST') {
+      const body = await readBody(req);
+      const text = String(body.text || '').trim();
+      if (!text) return json(res, 400, { ok: false, error: '内容为空' });
+      await doReply({ kind: 'chat', username: body.username || '测试观众', text });
+      return json(res, 200, { ok: true, latest: getState().events.at(-1) });
+    }
+
+    if (p === '/api/ai/test' && req.method === 'POST') {
+      const cfg = getConfig();
+      const started = Date.now();
+      const raw = await aiComplete(
+        cfg,
+        buildMessages(cfg, getState(), { username: '测试观众', text: '在吗？用一句话打个招呼' }),
+        { temperature: cfg.ai.temperature, maxTokens: 120, timeoutMs: 30000 },
+      );
+      const cost = costOf(raw.usage, ratesFor(cfg.pricing, raw.usedModel || cfg.ai.model));
+      return json(res, 200, {
+        ok: true,
+        text: raw.text,
+        usage: raw.usage,
+        cost,
+        provider: raw.provider,
+        model: raw.usedModel,
+        ms: Date.now() - started,
+        peak: isPeak(),
+      });
+    }
+
+    // ---- 配置 ----
+    if (p === '/api/config' && req.method === 'GET') {
+      return json(res, 200, { ok: true, config: publicConfig() });
+    }
+
+    if (p === '/api/broadcast' && req.method === 'GET') {
+      return json(res, 200, { ok: true, broadcast: broadcastScheduleTick() });
+    }
+
+    if (p === '/api/broadcast' && req.method === 'POST') {
+      const body = await readBody(req);
+      const mode = String(body.mode || 'auto');
+      const forced = mode === 'fitness' || mode === 'story' ? mode : null;
+      updateConfig({ broadcast: { forced } });
+      await saveConfig();
+      return json(res, 200, { ok: true, broadcast: applyBroadcastMode({ force: true }) });
+    }
+
+    if (p === '/api/config' && req.method === 'POST') {
+      const body = await readBody(req);
+      // 两种写法都收：直接 {ai:{...}}，或者包一层 {patch:{ai:{...}}}
+      const patch = body && body.patch && typeof body.patch === 'object' ? body.patch : body;
+      assertPatch(patch);
+      updateConfig(patch);
+      await saveConfig();
+      if (patch.ai?.apiKey) balanceAt = 0;
+      if (patch.music && 'neteaseCookie' in patch.music) {
+        // 换了会员 cookie：清掉旧解析缓存和登录态缓存
+        clearMusicCache();
+        memberAt = 0;
+        memberCache = null;
+        await refreshMember({ force: true });
+      }
+      if (patch.danmaku && 'cookie' in patch.danmaku && bridge.state === 'live') {
+        // 换了抖音 cookie：重连一次，才能收到礼物推送
+        const rid = getConfig().danmaku?.roomId || getConfig().roomId;
+        if (rid) startDanmaku(rid).catch((err) => console.warn('[danmaku] 重连失败：', err.message));
+      }
+      if (patch.demo !== undefined) {
+        patch.demo ? startDemo() : stopDemo();
+      }
+      if (patch.broadcast) broadcastScheduleTick();
+      broadcast({ type: 'config', config: publicConfig() });
+      await refreshBalance(true);
+      return json(res, 200, { ok: true, config: publicConfig() });
+    }
+
+    // ---- 余额 ----
+    if (p === '/api/balance' && req.method === 'GET') {
+      const b = await refreshBalance(url.searchParams.get('force') === '1');
+      return json(res, 200, { ok: Boolean(b && !b.error), balance: b });
+    }
+
+    // ---- 切歌 / 重置 ----
+    if (p === '/api/song/next' && req.method === 'POST') {
+      const cur = nextSong();
+      if (cur) await resolveCurrent({ force: true });
+      broadcast({ type: 'song', ...songView() });
+      if (cur) ensureSystemVolume().catch(() => {});
+      return json(res, 200, { ok: true, song: cur });
+    }
+
+    // ---- 音乐播放源 ----
+    if (p === '/api/music' && req.method === 'GET') {
+      await refreshMember();
+      return json(res, 200, { ok: true, music: musicView() });
+    }
+
+    // 网易云会员登录态（粘贴 MUSIC_U 后用它检查）
+    if (p === '/api/music/member' && req.method === 'GET') {
+      const m = await refreshMember({ force: url.searchParams.get('force') === '1' });
+      return json(res, 200, { ok: true, member: m, music: musicView() });
+    }
+
+    if (p === '/api/music/reindex' && req.method === 'POST') {
+      clearMusicCache();
+      listLocal(getConfig(), { force: true });
+      broadcast({ type: 'song', ...songView() });
+      return json(res, 200, { ok: true, music: musicView() });
+    }
+
+    if (p === '/api/music/resolve' && req.method === 'POST') {
+      const cur = await resolveCurrent({ force: true });
+      return json(res, 200, { ok: true, currentSong: cur, music: musicView() });
+    }
+
+    // 前端 <audio> 播完一首 → 自动下一首
+    if (p === '/api/music/ended' && req.method === 'POST') {
+      const cur = nextSong();
+      if (cur) await resolveCurrent({ force: true });
+      broadcast({ type: 'song', ...songView() });
+      if (cur) ensureSystemVolume().catch(() => {});
+      return json(res, 200, { ok: true, currentSong: cur, song: songView() });
+    }
+
+    if (p === '/api/music/search' && req.method === 'GET') {
+      const q = url.searchParams.get('q') || '';
+      const list = await musicSearch(getConfig(), q).catch(() => []);
+      return json(res, 200, { ok: true, q, list });
+    }
+
+    // 操作台手动指定一首（不经过弹幕点歌）
+    if (p === '/api/music/play' && req.method === 'POST') {
+      const body = await readBody(req);
+      const title = String(body.title || '').trim();
+      if (!title) return json(res, 400, { ok: false, error: '歌名不能为空' });
+      setCurrentSong({ title, by: String(body.by || '点歌') });
+      clearMusicCache();
+      await resolveCurrent({ force: true });
+      return json(res, 200, { ok: true, song: songView() });
+    }
+
+    if (p.startsWith('/api/music/stream/') && req.method === 'GET') {
+      const id = decodeURIComponent(p.slice('/api/music/stream/'.length));
+      const track = findById(getConfig(), id);
+      const file = track && trackPath(getConfig(), track);
+      if (!file || !existsSync(file)) return json(res, 404, { ok: false, error: '没有这个文件' });
+      return streamFile(req, res, file);
+    }
+
+    // ---- 绫波丽的声音（MiniMax / edge-tts / Kokoro / 系统离线）----
+    if (p === '/api/voice' && req.method === 'GET') {
+      const cfg = getConfig();
+      return json(res, 200, {
+        ok: true,
+        voice: {
+          enabled: cfg.voice?.enabled !== false,
+          volume: cfg.voice?.volume ?? 0.9,
+          rate: cfg.voice?.rate ?? 1,
+          engine: cfg.voice?.engine || 'edge',
+          preset: cfg.voice?.preset || 'natural',
+          name: cfg.voice?.voice || '',
+          voices: await listVoices().catch(() => []),
+          presets: EDGE_PRESETS,
+          kokoro: KOKORO_PRESETS,
+          minimax: MINIMAX_PRESETS,
+          minimaxHasKey: Boolean(process.env.MINIMAX_API_KEY || cfg.voice?.minimaxApiKey),
+          minimaxModel: cfg.voice?.minimaxModel || 'speech-2.8-hd',
+          minimaxVoice: cfg.voice?.minimaxVoice || MINIMAX_PRESETS.lyrical.voiceId,
+          lastError: voiceError,
+        },
+      });
+    }
+
+    if (p === '/api/voice/test' && req.method === 'POST') {
+      const cfg = getConfig();
+      try {
+        const r = await synthesize('晚上好呀，我是绫波丽，今天也来讲故事给你听。', voiceOptsOf(cfg));
+        return json(res, 200, { ok: true, ...r });
+      } catch (e) {
+        voiceError = e.message;
+        return json(res, 500, { ok: false, error: e.message });
+      }
+    }
+
+    if (p === '/api/voice/say' && req.method === 'POST') {
+      const body = await readBody(req);
+      const text = String(body.text || '').slice(0, 3000);
+      if (!text.trim()) return json(res, 400, { ok: false, error: '没有可念的文字' });
+      const cfg = getConfig();
+      try {
+        const r = await synthesize(text, voiceOptsOf(cfg));
+        voiceError = null;
+        return json(res, 200, { ok: true, ...r });
+      } catch (e) {
+        voiceError = e.message;
+        return json(res, 500, { ok: false, error: e.message });
+      }
+    }
+
+    /* 系统音量太低是最常见的「直播间没声音」：一键把默认播放设备调到 60% */
+    if (p === '/api/audio/volume' && req.method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      const target = Math.min(1, Math.max(0.1, Number(body.target ?? 0.6) || 0.6));
+      const script = path.join(ROOT, 'tools', 'audio-loud.ps1');
+      if (!existsSync(script)) return json(res, 500, { ok: false, error: '找不到 tools/audio-loud.ps1' });
+      return new Promise((resolve) => {
+        execFile(
+          'powershell',
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, String(target)],
+          { timeout: 60000, windowsHide: true },
+          (err, stdout, stderr) => {
+            const out = String(stdout || '').trim().split(/\r?\n/).filter(Boolean);
+            sysVolLast = out.slice(-1)[0] || sysVolLast;
+            if (err) {
+              json(res, 500, { ok: false, error: (String(stderr || '').trim() || err.message).slice(0, 400), out });
+            } else {
+              json(res, 200, { ok: true, out: out.slice(-3), target });
+            }
+            resolve();
+          },
+        );
+      });
+    }
+
+    if (p === '/api/audio/status' && req.method === 'GET') {
+      return json(res, 200, { ok: true, last: sysVolLast, at: sysVolAt });
+    }
+
+    if (p.startsWith('/api/voice/') && req.method === 'GET') {
+      const file = voiceMediaPath(p.slice('/api/voice/'.length));
+      if (!file) return json(res, 404, { ok: false, error: '没有这段语音' });
+      return streamFile(req, res, file);
+    }
+
+    if (p === '/api/reset' && req.method === 'POST') {
+      resetDay();
+      // 顺手清掉不在礼物表里的历史键（比如手滑造出来的假名字）
+      const gs = getState();
+      const names = new Set(getConfig().gifts.map((g) => g.name));
+      for (const k of Object.keys(gs.giftBook)) if (!names.has(k)) delete gs.giftBook[k];
+      broadcast({ type: 'init', config: publicConfig(), stats: statsView(), balance, song: songView(), gifts: getConfig().gifts, events: [], story: storyView(getConfig()) });
+      return json(res, 200, { ok: true, stats: statsView() });
+    }
+
+    // ---- 念小说 ----
+    if (p === '/api/novel' && req.method === 'GET') {
+      return json(res, 200, {
+        ok: true,
+        story: storyView(getConfig()),
+        novels: listNovels(getConfig()).map((n) => ({ name: n.name, day: n.day, size: n.size })),
+        tokens: statsView(),
+      });
+    }
+
+    if (p === '/api/novel/list' && req.method === 'GET') {
+      const cfg = getConfig();
+      const novels = listNovels(cfg).map((n) => {
+        let chapters = 0;
+        let chars = 0;
+        try {
+          const f = loadNovelFile(cfg, n.name);
+          chapters = f.chapters?.length || 0;
+          chars = (f.chapters || []).reduce((a, c) => a + c.text.length, 0);
+        } catch {
+          /* 读坏了就只给基本信息 */
+        }
+        return { name: n.name, title: n.title || n.name, day: n.day, size: n.size, chapters, chars };
+      });
+      return json(res, 200, { ok: true, novels, dir: novelDirLabel() });
+    }
+
+    if (p === '/api/novel/start' && req.method === 'POST') {
+      const body = await readBody(req);
+      const r = startNovel(getConfig(), { file: body.file ? String(body.file) : undefined });
+      if (!r.ok) return json(res, 400, r);
+      broadcastNovel('type');
+      scheduleNovel(400);
+      return json(res, 200, { ok: true, ...r, story: storyView(getConfig()) });
+    }
+
+    if (p === '/api/novel/stop' && req.method === 'POST') {
+      clearTimeout(novelTimer);
+      novelTimer = null;
+      stopNovel();
+      broadcastNovel('idle');
+      return json(res, 200, { ok: true, story: storyView(getConfig()) });
+    }
+
+    // 音频放完（页面调的）/ 手动「下一章」
+    if (p === '/api/novel/audio' && req.method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      const ms = setAudioMs(body.duration);
+      // 时长回填后重排看门狗，避免按字数估的长短偏差
+      const v1 = storyView(getConfig());
+      if (v1.phase === 'reading' && novelTimer) clearTimeout(novelTimer);
+      if (v1.phase === 'reading') scheduleNovel(watchdogDelay());
+      return json(res, 200, { ok: true, audioMs: ms });
+    }
+
+    if (p === '/api/novel/display' && req.method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      const mode = setDisplayMode(body.mode);
+      broadcastNovel('type');
+      return json(res, 200, { ok: true, mode, story: storyView(getConfig()) });
+    }
+
+    if ((p === '/api/novel/advance' || p === '/api/novel/next') && req.method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      const src = p.endsWith('advance') ? 'audio' : 'manual';
+      const v0 = storyView(getConfig());
+      if (src === 'manual' && v0.phase !== 'reading') {
+        const r = nextChapter();
+        broadcastNovel('type');
+        if (!r.more) await makeArchive(getConfig());
+        broadcastNovel('wave');
+        scheduleNovel(500);
+        return json(res, 200, { ok: true, skipped: true, story: storyView(getConfig()) });
+      }
+      const out = await chapterDone(src);
+      return json(res, 200, { ok: true, ...out, story: storyView(getConfig()) });
+    }
+
+    if (p === '/api/novel/auto' && req.method === 'POST') {
+      const body = await readBody(req);
+      const on = body.auto !== false;
+      updateConfig({ novel: { auto: on } });
+      await saveConfig();
+      broadcast({ type: 'config', config: publicConfig() });
+      if (on) scheduleNovel(500);
+      else {
+        clearTimeout(novelTimer);
+        novelTimer = null;
+      }
+      return json(res, 200, { ok: true, story: storyView(getConfig()) });
+    }
+
+    if (p === '/api/novel/reset' && req.method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      resetStory();
+      const r = startNovel(getConfig(), { file: body.file ? String(body.file) : undefined });
+      broadcastNovel('type');
+      if (r.ok) scheduleNovel(400);
+      return json(res, 200, { ok: r.ok, ...r, story: storyView(getConfig()) });
+    }
+
+    if (p === '/api/novel/config' && req.method === 'POST') {
+      const body = await readBody(req);
+      const patch = {};
+      if (typeof body.dir === 'string' && body.dir.trim()) patch.dir = body.dir.trim().slice(0, 80);
+      if (body.breakSec !== undefined) patch.breakSec = Math.max(30, Math.min(1800, Math.round(Number(body.breakSec) || 300)));
+      if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled);
+      if (body.autoStart !== undefined) patch.autoStart = Boolean(body.autoStart);
+      if (typeof body.startAt === 'string') {
+        const raw = body.startAt.trim();
+        const m = raw.match(/^(\d{1,2})[:：](\d{2})$/);
+        /* 空着 = 用默认 17:00；填 off 才是真的不定时 */
+        patch.startAt = m ? `${String(Number(m[1])).padStart(2, '0')}:${m[2]}` : raw.toLowerCase() === 'off' ? 'off' : '';
+        /* 改了开讲时间，之前那次的提醒记录就作废 */
+        markReminded(0);
+      }
+      updateConfig({ novel: patch });
+      await saveConfig();
+      broadcast({ type: 'config', config: publicConfig() });
+      broadcastNovel();
+      if (!String(getConfig().novel?.startAt || '').trim() && getConfig().novel?.enabled && getConfig().novel?.auto) {
+        scheduleNovel(800);
+      }
+      storyScheduleTick().catch(() => {});
+      return json(res, 200, { ok: true, story: storyView(getConfig()), novel: getConfig().novel });
+    }
+
+    if (p === '/api/novel/archive' && req.method === 'POST') {
+      const cfg = getConfig();
+      const obj = await makeArchive(cfg);
+      broadcastNovel('wave');
+      return json(res, 200, { ok: true, archive: obj });
+    }
+
+    /* 手动重生成「本章线索卡」（自动流程里由 chapterDone 触发，这个给调试/补生成用） */
+    if (p === '/api/novel/card' && req.method === 'POST') {
+      const cfg = getConfig();
+      const ch = currentChapter();
+      if (!ch) return json(res, 400, { ok: false, error: '还没开始念，没有当前章节' });
+      const summary = await summarizeChapter(cfg, ch);
+      broadcastNovel('wave');
+      const nv = getNovel() || {};
+      return json(res, 200, { ok: true, summary, card: (nv.cards || [])[nv.idx] || null });
+    }
+
+    if (p === '/api/novel/archive' && req.method === 'GET') {
+      const nv = getNovel() || {};
+      return json(res, 200, {
+        ok: true,
+        archive: nv.archive || null,
+        title: nv.title || '',
+        file: nv.file || '',
+        settings: nv.settings || '',
+        chapters: chaptersOf().map((c) => ({ title: c.title, chars: c.text.length })),
+        summaries: nv.summaries || [],
+        topics: topTopics(12),
+      });
+    }
+
+    if (p === '/api/novel/topics' && req.method === 'GET') {
+      return json(res, 200, { ok: true, topics: topTopics(12) });
+    }
+
+    if (p === '/api/novel/topics' && req.method === 'POST') {
+      const body = await readBody(req);
+      const item = addTopic(body.text, body.user ? String(body.user) : '');
+      if (!item) return json(res, 400, { ok: false, error: '选题是空的' });
+      broadcastNovel();
+      return json(res, 200, { ok: true, topic: item, topics: topTopics(12) });
+    }
+
+    // 旧接口留个壳，免得老页面 404
+    if (p === '/api/story' && req.method === 'GET') {
+      return json(res, 200, { ok: true, story: storyView(getConfig()), tokens: statsView() });
+    }
+
+    if (p === '/api/health' && req.method === 'GET') {
+      return json(res, 200, { ok: true, up: process.uptime(), clients: clients.size, peak: isPeak(), time: beijing() });
+    }
+
+    return json(res, 404, { ok: false, error: '没有这个接口' });
+  } catch (err) {
+    console.warn('[http]', p, err.message);
+    return json(res, 500, { ok: false, error: err.message });
+  }
+});
+
+server.listen(PORT_FINAL, process.env.HOST || '0.0.0.0', () => {
+  const cfg = getConfig();
+  const currentBroadcast = broadcastScheduleTick();
+  console.log('');
+  console.log('  🐋 绫波丽直播间已启动');
+  console.log(`     直播画面  http://127.0.0.1:${PORT_FINAL}/`);
+  console.log(`     操作台    http://127.0.0.1:${PORT_FINAL}/admin`);
+  console.log(`     直播时段  ${currentBroadcast.enabled ? `${currentBroadcast.title}（${currentBroadcast.start || '--:--'}-${currentBroadcast.end || '--:--'}）` : '未启用'}`);
+  console.log(`     API Key   ${getConfig().ai.apiKey ? '已配置' : '未配置（可在 /admin 里填）'}`);
+  console.log(`     音乐源    ${cfg.music?.provider || 'auto'} · 本地 ${listLocal(cfg).length} 首`);
+  console.log('');
+  if (cfg.radio?.enabled !== false) {
+    const n = radio.load();
+    if (n) {
+      radio.start();
+      console.log(`     氛围电台  ${n} 首 · 音量 ${Number(cfg.radio?.volume ?? 0.13)} · 按时间与在场自动换曲`);
+    } else {
+      console.log(`     氛围电台  没找到曲库（assets_music/catalog.json）：${radio.status().lastError}`);
+    }
+  }
+  if (getState().currentSong && !getState().currentSong.url) resolveCurrent({ force: true });
+  if (cfg.demo) startDemo();
+  if (cfg.novel?.enabled && cfg.novel?.auto && currentBroadcast.mode !== 'fitness') {
+    const list = listNovels(cfg);
+    if (!list.length) {
+      console.log(`  📖 小说朗读：「${cfg.novel?.dir || '短篇'}」里还没有小说，放一个 .txt 进去就会自动念`);
+    } else {
+      const v = storyView(cfg);
+      const pick = v.file || list[0].name;
+      console.log(`  📖 小说朗读：${pick}（${v.chapterCount || '?'} 章）${v.phase !== 'idle' ? `· 接着上次的进度（${v.phaseLabel}）` : ''}`);
+    }
+    /* 设了开讲时间：到点再念，之前先陪聊；没设就开窗即念 */
+    const at = nextStartMs(cfg);
+    if (at && (storyView(cfg).phase === 'idle' || storyView(cfg).phase === 'done')) {
+      console.log(`  ⏰ 定时开讲：${fmtHm(at)}（提前 5 分钟会提醒一次）`);
+    } else {
+      scheduleNovel(2200);
+    }
+  }
+  /* 定时器：每分钟看一次要不要提醒 / 开讲 */
+  setInterval(() => {
+    broadcastScheduleTick();
+    storyScheduleTick().catch((err) => console.warn('[schedule]', err.message));
+  }, 60_000);
+  broadcastScheduleTick();
+  storyScheduleTick().catch(() => {});
+  if (cfg.danmaku?.mode !== 'off') {
+    const rid = cfg.danmaku?.roomId || cfg.roomId || '';
+    if (rid) {
+      startDanmaku(rid).catch(() => {});
+    } else {
+      console.log('  📡 弹幕直连：还没填房间号（操作台「弹幕接入」里填，或等开播后填）');
+    }
+  }
+});
+
+process.on('SIGINT', async () => {
+  radio.stop();
+  stopDemo();
+  bridge.stop();
+  await flush();
+  process.exit(0);
+});
